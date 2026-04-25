@@ -2014,27 +2014,67 @@ export default function App() {
                   <button 
                     onClick={async () => {
                       if(!migrationText.trim()) return alert("Pegue los datos primero.");
-                      if(!confirm("⚠️ CUIDADO: Esto reemplazará todo el sistema. ¿Continuar?")) return;
+                      if(!confirm("⚠️ CUIDADO: Esto reemplazará todo el sistema con los datos cargados. ¿Continuar?")) return;
                       setIsSubmitting(true);
                       try {
-                        const data = JSON.parse(migrationText);
+                        const rawData = JSON.parse(migrationText);
+                        
+                        // Normalización de datos (Soporte para formato viejo)
+                        const normalizedLoans = (rawData.loans || []).map((l: any) => {
+                          // Si es formato viejo (detectamos totalDebt), mapeamos campos
+                          if (l.totalDebt !== undefined && l.debt === undefined) {
+                            const debt = Number(l.totalDebt || 0);
+                            const paid = Number(l.paid || 0);
+                            // Convertir fecha YYYY-MM-DD a DD/MM/YYYY
+                            let formattedDate = new Date().toLocaleDateString('es-DO');
+                            if (l.startDate && l.startDate.includes('-')) {
+                              const [y, m, d] = l.startDate.split('-');
+                              formattedDate = `${d}/${m}/${y}`;
+                            }
+                            return {
+                              client: l.client || "Sin nombre",
+                              date: formattedDate,
+                              principal: Number(l.principal || 0),
+                              debt: debt,
+                              remaining: Math.max(0, debt - paid),
+                              status: l.status === 'completed' ? 'PAGADO' : 'ACTIVO',
+                              installments: Number(l.term || 1),
+                              freqDays: Number(l.freqDays || 15),
+                              phone: l.phone || "",
+                              address: l.address || "",
+                              createdAt: l.createdAt || new Date().toISOString()
+                            };
+                          }
+                          return l;
+                        });
+
+                        const normalizedTransactions = rawData.transactions || [];
+                        
                         const batch = writeBatch(db);
+                        
+                        // Limpiar actual
                         loans.forEach(l => batch.delete(doc(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'loans', l.id)));
                         transactions.forEach(t => batch.delete(doc(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'transactions', t.id)));
 
-                        data.loans.forEach((l: any) => {
+                        // Cargar nuevos
+                        normalizedLoans.forEach((l: any) => {
                           const { id, ...clean } = l;
                           batch.set(doc(collection(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'loans')), clean);
                         });
-                        data.transactions.forEach((t: any) => {
+                        
+                        normalizedTransactions.forEach((t: any) => {
                           const { id, ...clean } = t;
                           batch.set(doc(collection(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'transactions')), clean);
                         });
 
                         await batch.commit();
-                        toast.success("Sistema restaurado");
+                        toast.success("Sistema restaurado y datos migrados");
                         setShowMigrationModal(false);
-                      } catch (e: any) { alert("Error: " + e.message); }
+                        setMigrationText('');
+                      } catch (e: any) { 
+                        console.error(e);
+                        alert("Error: " + e.message); 
+                      }
                       finally { setIsSubmitting(false); }
                     }}
                     disabled={isSubmitting}
