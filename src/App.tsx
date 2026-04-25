@@ -909,9 +909,9 @@ export default function App() {
           <div className="bg-brand-secondary w-20 h-20 rounded-2xl flex items-center justify-center mx-auto mb-6 border border-brand-border">
             <ShieldCheck className="w-10 h-10 text-brand-primary" />
           </div>
-          <h1 className="text-3xl font-black text-brand-text mb-2 tracking-tight uppercase text-center">Cloud Sync</h1>
+          <h1 className="text-3xl font-black text-brand-text mb-2 tracking-tight uppercase text-center">SINCRONIZACIÓN</h1>
           <p className="text-brand-text/50 font-bold mb-8 uppercase text-[10px] tracking-widest leading-relaxed text-center">
-            Sincroniza tus datos entre dispositivos de forma profesional.
+            Inicia sesión para ver tus préstamos en cualquier dispositivo.
           </p>
           
           <div className="space-y-6">
@@ -926,6 +926,7 @@ export default function App() {
                     onChange={(e) => setEmail(e.target.value)}
                     className="w-full bg-brand-secondary border border-brand-border rounded-xl py-4 pl-12 pr-4 text-sm text-brand-text focus:outline-none focus:border-brand-primary/50 transition-all font-medium"
                     placeholder="usuario@correo.com"
+                    required
                   />
                 </div>
               </div>
@@ -940,6 +941,7 @@ export default function App() {
                     onChange={(e) => setPassword(e.target.value)}
                     className="w-full bg-brand-secondary border border-brand-border rounded-xl py-4 pl-12 pr-4 text-sm text-brand-text focus:outline-none focus:border-brand-primary/50 transition-all font-medium"
                     placeholder="••••••••"
+                    required
                   />
                 </div>
               </div>
@@ -948,7 +950,7 @@ export default function App() {
                 type="submit"
                 className="w-full bg-brand-primary text-white py-4 rounded-xl font-black uppercase text-[10px] tracking-widest shadow-lg shadow-brand-primary/20 hover:brightness-110 active:scale-95 transition-all"
               >
-                {authMode === 'login' ? 'Iniciar Sesión' : 'Crear Cuenta'}
+                {authMode === 'login' ? 'ENTRAR AL SISTEMA' : 'CREAR NUEVA CUENTA'}
               </button>
 
               <p className="text-center">
@@ -957,7 +959,7 @@ export default function App() {
                   onClick={() => setAuthMode(authMode === 'login' ? 'register' : 'login')}
                   className="text-[10px] font-black uppercase text-brand-primary hover:underline"
                 >
-                  {authMode === 'login' ? '¿No tienes cuenta? Regístrate' : '¿Ya tienes cuenta? Inicia sesión'}
+                  {authMode === 'login' ? '¿No tienes cuenta? Regístrate aquí' : '¿Ya tienes cuenta? Inicia sesión'}
                 </button>
               </p>
             </form>
@@ -980,7 +982,7 @@ export default function App() {
                 onClick={loginAnonymously}
                 className="bg-brand-secondary text-brand-text/70 py-4 rounded-xl font-black uppercase text-[9px] tracking-tight hover:bg-brand-secondary/80 active:scale-95 transition-all border border-brand-border"
               >
-                Invitado
+                INVITADO
               </button>
             </div>
           </div>
