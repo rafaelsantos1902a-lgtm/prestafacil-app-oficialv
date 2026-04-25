@@ -1,0 +1,85 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 0.1 Common helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Pillar 2: Validation Blueprints
+    function isValidLoan(data) {
+      let requiredFields = ['client', 'date', 'debt', 'remaining', 'principal', 'status', 'freqDays', 'installments'];
+      let optionalFields = ['phone', 'idNumber', 'address', 'workplace', 'interestRate', 'fixedQuota', 'progress', 'createdAt'];
+      return data.keys().hasAll(requiredFields)
+        && data.keys().size() <= (requiredFields.size() + optionalFields.size())
+        && data.client is string && data.client.size() <= 100
+        && data.date is string && data.date.size() <= 20
+        && data.debt is number && data.debt >= 0
+        && data.remaining is number && data.remaining >= 0
+        && data.principal is number && data.principal >= 0
+        && data.status in ['ACTIVO', 'PAGADO', 'RENOVADO']
+        && data.freqDays is number
+        && data.installments is number
+        && data.get('phone', '') is string && data.get('phone', '').size() <= 20
+        && (data.get('interestRate', 0) == null || data.get('interestRate', 0) is number)
+        && (data.get('fixedQuota', 0) == null || data.get('fixedQuota', 0) is number);
+    }
+
+    function isValidTransaction(data) {
+      let requiredFields = ['type', 'amount', 'concept', 'date'];
+      return data.keys().hasAll(requiredFields)
+        && data.keys().size() == requiredFields.size()
+        && data.type in ['INYECCION', 'RETIRO']
+        && data.amount is number && data.amount >= 0
+        && data.concept is string && data.concept.size() <= 500
+        && data.date is string && data.date.size() <= 40;
+    }
+
+    // Match rules
+    match /artifacts/prestafacil-v1/users/{userId} {
+      // User path hardening
+      allow get: if isOwner(userId) && isValidId(userId);
+
+      match /loans/{loanId} {
+        // Pillar 8: Secure List Queries
+        allow list: if isOwner(userId);
+        allow get: if isOwner(userId) && isValidId(loanId);
+        
+        allow create: if isOwner(userId) && isValidLoan(request.resource.data) && isValidId(loanId);
+        
+        allow update: if isOwner(userId) && isValidLoan(request.resource.data) && (
+          // Action: Edit
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['client', 'phone', 'idNumber', 'address', 'workplace', 'status', 'remaining']) ||
+          // Action: Process Payment
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['remaining', 'progress', 'status']) ||
+          // Action: Renew
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'remaining'])
+        );
+        
+        allow delete: if isOwner(userId) && isValidId(loanId);
+      }
+
+      match /transactions/{transactionId} {
+        allow list: if isOwner(userId);
+        allow get: if isOwner(userId) && isValidId(transactionId);
+        
+        allow create: if isOwner(userId) && isValidTransaction(request.resource.data) && isValidId(transactionId);
+        allow update: if false; // Transactions are immutable
+        allow delete: if isOwner(userId) && isValidId(transactionId);
+      }
+    }
+  }
+}

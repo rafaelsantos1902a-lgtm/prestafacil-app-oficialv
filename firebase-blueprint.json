@@ -1,0 +1,50 @@
+{
+  "entities": {
+    "Loan": {
+      "title": "Loan",
+      "description": "Financial loan record",
+      "type": "object",
+      "properties": {
+        "client": { "type": "string", "description": "Client name" },
+        "phone": { "type": "string", "description": "Phone number" },
+        "idNumber": { "type": "string", "description": "Identification number (ID/Cédula)" },
+        "address": { "type": "string", "description": "Home address" },
+        "workplace": { "type": "string", "description": "Workplace name" },
+        "date": { "type": "string", "description": "Start date (DD/MM/YYYY)" },
+        "progress": { "type": "number", "description": "Repayment percentage" },
+        "debt": { "type": "number", "description": "Total debt amount" },
+        "remaining": { "type": "number", "description": "Remaining balance" },
+        "principal": { "type": "number", "description": "Initial capital amount" },
+        "status": { "type": "string", "enum": ["ACTIVO", "PAGADO", "RENOVADO"], "description": "Loan status" },
+        "freqDays": { "type": "number", "description": "Installment frequency in days" },
+        "installments": { "type": "number", "description": "Total number of installments" },
+        "interestRate": { "type": "number", "description": "Interest rate percentage" },
+        "fixedQuota": { "type": "number", "description": "Fixed installment amount" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Creation timestamp" }
+      },
+      "required": ["client", "date", "debt", "remaining", "principal", "status"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "Financial transaction (payment or withdrawal)",
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["INYECCION", "RETIRO"], "description": "Transaction type" },
+        "amount": { "type": "number", "description": "Transaction amount" },
+        "concept": { "type": "string", "description": "Transaction description" },
+        "date": { "type": "string", "format": "date-time", "description": "ISO timestamp of transaction" }
+      },
+      "required": ["type", "amount", "concept", "date"]
+    }
+  },
+  "firestore": {
+    "/artifacts/prestafacil-v1/users/{userId}/loans/{loanId}": {
+      "schema": "Loan",
+      "description": "User's loan records"
+    },
+    "/artifacts/prestafacil-v1/users/{userId}/transactions/{transactionId}": {
+      "schema": "Transaction",
+      "description": "User's transaction history"
+    }
+  }
+}

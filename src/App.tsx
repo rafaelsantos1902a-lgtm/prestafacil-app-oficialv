@@ -110,11 +110,25 @@ export default function App() {
 
   useEffect(() => {
     const initAuth = async () => {
-      try { await signInAnonymously(auth); } 
-      catch (error) { setAuthError("Error de conexión con Firebase. Verifique su red."); }
+      try { 
+        await signInAnonymously(auth); 
+      } 
+      catch (error: any) { 
+        console.error("Auth error:", error);
+        if (error.code === 'auth/operation-not-allowed') {
+          setAuthError("ERROR: Debe habilitar 'Inicio de sesión anónimo' en su consola de Firebase (Authentication > Sign-in method).");
+        } else {
+          setAuthError("Error de conexión con Firebase: " + error.message); 
+        }
+      }
     };
     initAuth();
-    const unsubscribe = onAuthStateChanged(auth, (u) => { if (u) setUser(u); });
+    const unsubscribe = onAuthStateChanged(auth, (u) => { 
+      if (u) {
+        setUser(u);
+        setAuthError(null);
+      } 
+    });
     return () => unsubscribe();
   }, []);
 
@@ -886,8 +900,10 @@ export default function App() {
           <div>
             <span className="text-lg font-black tracking-tight text-brand-text">PRESTAFÁCIL</span>
             <div className="flex items-center gap-1.5 -mt-1">
-              <div className="w-1.5 h-1.5 rounded-full bg-brand-green animate-pulse"></div>
-              <span className="text-[9px] font-bold text-brand-text/40">ESTADO: ONLINE</span>
+              <div className={`w-1.5 h-1.5 rounded-full animate-pulse ${user ? 'bg-brand-green' : 'bg-brand-red'}`}></div>
+              <span className="text-[9px] font-bold text-brand-text/40 uppercase">
+                ESTADO: {authError ? 'ERROR' : (user ? 'CONECTADO' : 'CONECTANDO...')}
+              </span>
             </div>
           </div>
         </div>
@@ -906,6 +922,26 @@ export default function App() {
       </nav>
 
       <main className="max-w-7xl mx-auto px-4 py-8 no-print">
+        {authError && (
+          <motion.div 
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="mb-8 bg-brand-red p-6 rounded-2xl border border-brand-red/20 shadow-xl flex items-center gap-4"
+          >
+            <div className="bg-white/20 p-3 rounded-xl"><AlertCircle className="w-6 h-6 text-white" /></div>
+            <div className="flex-1">
+              <h3 className="text-white font-black uppercase text-sm tracking-tight">Problema de Conexión</h3>
+              <p className="text-white/80 text-[11px] font-bold mt-1 uppercase tracking-wider">{authError}</p>
+            </div>
+            <button 
+              onClick={() => window.location.reload()}
+              className="bg-white text-brand-red px-4 py-2 rounded-lg text-[10px] font-black uppercase shadow-lg active:scale-95 transition-all"
+            >
+              Reintentar
+            </button>
+          </motion.div>
+        )}
+        
         {/* Dashboard Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
           <motion.div 
