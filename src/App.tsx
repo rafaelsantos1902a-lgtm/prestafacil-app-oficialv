@@ -144,10 +144,17 @@ export default function App() {
     } catch (error: any) {
       console.error("Email auth error:", error);
       let msg = "Error: " + error.message;
-      if (error.code === 'auth/user-not-found') msg = "Usuario no encontrado.";
-      if (error.code === 'auth/wrong-password') msg = "Contraseña incorrecta.";
-      if (error.code === 'auth/email-already-in-use') msg = "El correo ya está en uso.";
-      if (error.code === 'auth/invalid-email') msg = "Correo inválido.";
+      if (error.code === 'auth/operation-not-allowed') {
+        msg = "ERROR: Debes habilitar 'Correo electrónico/Contraseña' en tu consola de Firebase (Authentication > Sign-in method).";
+      } else if (error.code === 'auth/user-not-found') {
+        msg = "Usuario no encontrado.";
+      } else if (error.code === 'auth/wrong-password') {
+        msg = "Contraseña incorrecta.";
+      } else if (error.code === 'auth/email-already-in-use') {
+        msg = "El correo ya está en uso.";
+      } else if (error.code === 'auth/invalid-email') {
+        msg = "Correo inválido.";
+      }
       setAuthError(msg);
     }
   };
