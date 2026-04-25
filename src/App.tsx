@@ -5,12 +5,12 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { 
-  Wallet, TrendingUp, PiggyBank, Search, Plus, 
+  ShieldCheck, Wallet, TrendingUp, PiggyBank, Search, Plus, 
   CheckCircle2, Calendar, FileText, Printer, X, 
   MessageCircle, Edit, Trash2, AlertCircle, 
   History, ArrowDownRight, ArrowUpRight, Cloud, ListChecks, 
   Phone, Home, Briefcase, Check, Lock, Trash, Upload, Download,
-  MapPin, User, Moon, Sun
+  MapPin, User, Moon, Sun, LogOut
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Toaster, toast } from 'sonner';
@@ -18,10 +18,10 @@ import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
 
 import { initializeApp } from 'firebase/app';
-import { getAuth, signInAnonymously, onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
+import { getAuth, signInAnonymously, onAuthStateChanged, User as FirebaseUser, GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
 import { 
   getFirestore, collection, onSnapshot, doc, addDoc, updateDoc, 
-  deleteDoc, writeBatch, query, orderBy 
+  deleteDoc, writeBatch, query, orderBy, getDocFromServer 
 } from 'firebase/firestore';
 
 // 1. CONFIGURACIÓN FIREBASE
@@ -70,6 +70,7 @@ interface Transaction {
 
 export default function App() {
   const [user, setUser] = useState<FirebaseUser | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [pinInput, setPinInput] = useState('');
   const [loans, setLoans] = useState<Loan[]>([]);
@@ -83,6 +84,7 @@ export default function App() {
     return false;
   });
   const [authError, setAuthError] = useState<string | null>(null);
+  const [isSyncing, setIsSyncing] = useState(false);
   const [systemMessage, setSystemMessage] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   
@@ -109,28 +111,39 @@ export default function App() {
   const [cashForm, setCashForm] = useState({ type: 'INYECCION' as 'INYECCION' | 'RETIRO', amount: '', concept: '' });
 
   useEffect(() => {
-    const initAuth = async () => {
-      try { 
-        await signInAnonymously(auth); 
-      } 
-      catch (error: any) { 
-        console.error("Auth error:", error);
-        if (error.code === 'auth/operation-not-allowed') {
-          setAuthError("ERROR: Debe habilitar 'Inicio de sesión anónimo' en su consola de Firebase (Authentication > Sign-in method).");
-        } else {
-          setAuthError("Error de conexión con Firebase: " + error.message); 
-        }
-      }
-    };
-    initAuth();
     const unsubscribe = onAuthStateChanged(auth, (u) => { 
+      setUser(u);
+      setAuthLoading(false);
       if (u) {
-        setUser(u);
         setAuthError(null);
       } 
     });
     return () => unsubscribe();
   }, []);
+
+  const loginWithGoogle = async () => {
+    const provider = new GoogleAuthProvider();
+    try {
+      await signInWithPopup(auth, provider);
+    } catch (error: any) {
+      console.error("Login error:", error);
+      setAuthError("Error al iniciar sesión: " + error.message);
+    }
+  };
+
+  const loginAnonymously = async () => {
+    try {
+      await signInAnonymously(auth);
+    } catch (error: any) {
+      setAuthError("Error al iniciar sesión: " + error.message);
+    }
+  };
+
+  const handleLogout = async () => {
+    if (confirm("¿Cerrar sesión?")) {
+      await signOut(auth);
+    }
+  };
 
   useEffect(() => {
     if (!user || !isAuthenticated) return;
@@ -848,6 +861,59 @@ export default function App() {
     setSystemMessage(null);
   };
 
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-brand-bg flex items-center justify-center">
+        <div className="w-12 h-12 border-4 border-brand-primary border-t-transparent rounded-full animate-spin"></div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="min-h-screen bg-brand-bg flex items-center justify-center p-6 selection:bg-brand-primary/30">
+        <Toaster position="top-right" richColors />
+        <motion.div 
+          initial={{ opacity: 0, scale: 0.95 }} 
+          animate={{ opacity: 1, scale: 1 }}
+          className="bg-brand-surface rounded-2xl p-10 w-full max-w-md border border-brand-border shadow-2xl text-center"
+        >
+          <div className="bg-brand-secondary w-20 h-20 rounded-2xl flex items-center justify-center mx-auto mb-6 border border-brand-border">
+            <ShieldCheck className="w-10 h-10 text-brand-primary" />
+          </div>
+          <h1 className="text-3xl font-black text-brand-text mb-2 tracking-tight uppercase">Sincronización</h1>
+          <p className="text-brand-text/50 font-bold mb-8 uppercase text-[10px] tracking-widest leading-relaxed">
+            Inicia sesión para ver tus préstamos en cualquier dispositivo.
+          </p>
+          
+          <div className="space-y-3">
+            <button 
+              onClick={loginWithGoogle}
+              className="w-full bg-white text-slate-900 py-4 rounded-xl font-black flex items-center justify-center gap-3 shadow-lg hover:bg-slate-50 active:scale-95 transition-all text-xs border border-slate-200"
+            >
+              <img src="https://www.gstatic.com/firebase/explore/google.svg" className="w-4 h-4" alt="Google" />
+              ACCEDER CON GOOGLE
+            </button>
+            
+            <div className="relative py-4">
+              <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-brand-border"></div></div>
+              <div className="relative flex justify-center text-[8px] font-black uppercase text-brand-text/30 bg-brand-surface px-2">o</div>
+            </div>
+
+            <button 
+              onClick={loginAnonymously}
+              className="w-full bg-brand-secondary text-brand-text/70 py-4 rounded-xl font-black uppercase text-[10px] tracking-widest hover:bg-brand-secondary/80 active:scale-95 transition-all border border-brand-border"
+            >
+              Invitado (No sincroniza)
+            </button>
+          </div>
+
+          {authError && <p className="mt-6 text-brand-red font-bold text-[10px] uppercase tracking-wide leading-relaxed">{authError}</p>}
+        </motion.div>
+      </div>
+    );
+  }
+
   if (!isAuthenticated) {
     return (
       <div className="min-h-screen bg-brand-bg flex items-center justify-center p-6 selection:bg-brand-primary/30">
@@ -917,6 +983,13 @@ export default function App() {
           </button>
           <button onClick={() => setShowMigrationModal(true)} className="hidden md:flex items-center gap-2 bg-brand-secondary text-brand-text/70 border border-brand-border px-4 py-2 rounded-lg text-[10px] font-black uppercase hover:bg-brand-secondary/80 transition-all">
             <Cloud className="w-3.5 h-3.5" /> Respaldos
+          </button>
+          <button 
+            onClick={handleLogout} 
+            className="flex items-center justify-center bg-brand-secondary text-brand-red/70 border border-brand-border h-10 w-10 rounded-lg hover:bg-brand-red/10 transition-all shadow-sm"
+            title="Cerrar Sesión"
+          >
+            <LogOut className="w-5 h-5" />
           </button>
         </div>
       </nav>
