@@ -10,9 +10,10 @@ import {
   MessageCircle, Edit, Trash2, AlertCircle, 
   History, ArrowDownRight, ArrowUpRight, Cloud, ListChecks, 
   Phone, Home, Briefcase, Check, Lock, Trash, Upload, Download,
-  MapPin, User
+  MapPin, User, Moon, Sun
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { Toaster, toast } from 'sonner';
 import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
 
@@ -74,6 +75,13 @@ export default function App() {
   const [loans, setLoans] = useState<Loan[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [activeTab, setActiveTab] = useState<'activos' | 'historial'>('activos');
+  const [isDarkMode, setIsDarkMode] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('theme');
+      return saved === 'dark' || (!saved && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    }
+    return false;
+  });
   const [authError, setAuthError] = useState<string | null>(null);
   const [systemMessage, setSystemMessage] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
@@ -162,7 +170,371 @@ export default function App() {
   }, [loans]);
 
   const formatMoney = (n: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n || 0);
+
+  // Sistema de Notificaciones
+  const requestNotificationPermission = async () => {
+    if ('Notification' in window) {
+      if (Notification.permission === 'default') {
+        await Notification.requestPermission();
+      }
+    }
+  };
+
+  const sendPaymentAlert = (client: string, amount: number) => {
+    const title = '💰 Pago Recibido';
+    const body = `Se ha registrado un abono de ${formatMoney(amount)} de ${client}.`;
+    
+    // Alerta Visual (Toas)
+    toast.success(title, {
+      description: body,
+      duration: 5000,
+    });
+
+    // Alerta Push (Nativa)
+    if ('Notification' in window && Notification.permission === 'granted') {
+      new Notification(title, {
+        body,
+        icon: '/favicon.ico' // Opcional
+      });
+    }
+  };
+
+  useEffect(() => {
+    if (isDarkMode) {
+      document.documentElement.classList.add('dark');
+      localStorage.setItem('theme', 'dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+      localStorage.setItem('theme', 'light');
+    }
+  }, [isDarkMode]);
+
+  useEffect(() => {
+    requestNotificationPermission();
+  }, []);
+
+  const checkPaymentDeadlines = () => {
+    if (loans.length === 0) return;
+    
+    loans.forEach(loan => {
+      if (loan.status !== 'ACTIVO') return;
+      
+      const schedule = calculateSchedule(loan);
+      const pendingPayments = schedule.filter(s => s.status === 'PENDIENTE');
+      
+      if (pendingPayments.length > 0) {
+        const nextPayment = pendingPayments[0];
+        const dueDate = new Date(nextPayment.date);
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        dueDate.setHours(0, 0, 0, 0);
+        
+        const diffTime = today.getTime() - dueDate.getTime();
+        const diffDaysOverdue = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+        const diffDaysToWait = Math.ceil((dueDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+        
+        if (diffDaysOverdue > 0) {
+          // MORA
+          const moraRate = 0.05; // 5% daily as per contract
+          const moraAmount = nextPayment.amount * moraRate * diffDaysOverdue;
+          const totalWithMora = nextPayment.amount + moraAmount;
+          
+          const title = `⚠️ MORA: ${loan.client}`;
+          const body = `El pago de ${formatMoney(nextPayment.amount)} venció hace ${diffDaysOverdue} días. Mora acumulada: ${formatMoney(moraAmount)}. Total: ${formatMoney(totalWithMora)}`;
+          
+          toast.error(title, {
+            description: body,
+            action: {
+              label: "WhatsApp",
+              onClick: () => {
+                const text = `⚠️ *RECORDATORIO DE MORA - PRESTAFÁCIL*%0A👤 *Cliente:* ${loan.client}%0A🚨 *Estado:* Préstamo en MORA%0A💵 *Monto Vencido:* ${formatMoney(nextPayment.amount)}%0A📅 *Fecha Vencimiento:* ${nextPayment.date}%0A⚠️ _Por favor regularice su situación para evitar incrementos._`;
+                window.open(`https://wa.me/1${loan.phone.replace(/\D/g, '')}?text=${text}`, '_blank');
+              }
+            }
+          });
+          
+          if ('Notification' in window && Notification.permission === 'granted') {
+            new Notification(title, { body });
+          }
+        } else if (diffDaysToWait === 3 || diffDaysToWait === 1) {
+          // RECORDATORIO
+          const title = `📅 RECORDATORIO: ${loan.client}`;
+          const body = `Se aproxima un pago de ${formatMoney(nextPayment.amount)} en ${diffDaysToWait} días (${nextPayment.date}).`;
+          
+          toast.warning(title, {
+            description: body,
+            action: {
+              label: "Recordar",
+              onClick: () => {
+                const text = `🔔 *RECORDATORIO DE PAGO - PRESTAFÁCIL*%0A👤 *Cliente:* ${loan.client}%0A📅 *Fecha de Pago:* ${nextPayment.date}%0A💵 *Monto:* ${formatMoney(nextPayment.amount)}%0A✅ _Recuerde pagar a tiempo para mantener su buen historial._`;
+                window.open(`https://wa.me/1${loan.phone.replace(/\D/g, '')}?text=${text}`, '_blank');
+              }
+            }
+          });
+          
+          if ('Notification' in window && Notification.permission === 'granted') {
+            new Notification(title, { body });
+          }
+        }
+      }
+    });
+  };
+
+  useEffect(() => {
+    if (loans.length > 0) {
+      checkPaymentDeadlines();
+    }
+  }, [loans]);
   
+  const handleDownloadReceiptPDF = () => {
+    if (!currentLoan) return;
+    setIsSubmitting(true);
+    try {
+      const doc = new jsPDF({
+        orientation: 'p',
+        unit: 'mm',
+        format: [80, 120] // Smaller ticket
+      });
+
+      const client = currentLoan.client;
+      const amountNum = Number(paymentAmount);
+      const amount = formatMoney(amountNum);
+      
+      // Calculate totals for this client
+      const clientLoans = loans.filter(l => l.client === client && l.status === 'ACTIVO');
+      const totalDebt = clientLoans.reduce((sum, l) => sum + l.debt, 0);
+      const totalRemaining = clientLoans.reduce((sum, l) => sum + l.remaining, 0);
+
+      // Header
+      doc.setFillColor(37, 99, 235);
+      doc.rect(0, 0, 80, 2, 'F');
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(16);
+      doc.text('PRESTAFACIL', 40, 12, { align: 'center' });
+      
+      doc.setFontSize(7);
+      doc.setFont('helvetica', 'normal');
+      doc.text('RECIBO DE PAGO', 40, 16, { align: 'center' });
+
+      // Main Amount
+      doc.setFillColor(248, 250, 252);
+      doc.roundedRect(10, 22, 60, 15, 3, 3, 'F');
+      doc.setFontSize(6);
+      doc.text('PAGO DE HOY', 40, 26, { align: 'center' });
+      doc.setFontSize(14);
+      doc.setFont('helvetica', 'bold');
+      doc.text(amount, 40, 33, { align: 'center' });
+
+      // Details
+      doc.setFontSize(8);
+      doc.setFont('helvetica', 'normal');
+      
+      let y = 45;
+      doc.text('CLIENTE:', 10, y);
+      doc.text(client.toUpperCase(), 70, y, { align: 'right' });
+      
+      y += 8;
+      doc.text('FECHA:', 10, y);
+      doc.text(new Date().toLocaleDateString(), 70, y, { align: 'right' });
+
+      y += 12;
+      doc.text('PAGO RECIBIDO:', 10, y);
+      doc.text(amount, 70, y, { align: 'right' });
+
+      y += 10;
+      doc.setFont('helvetica', 'bold');
+      doc.text('SALDO PENDIENTE:', 10, y);
+      doc.setTextColor(239, 68, 68);
+      doc.text(formatMoney(totalRemaining), 70, y, { align: 'right' });
+
+      doc.setTextColor(0, 0, 0);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(6);
+      doc.text('Gracias por su confianza.', 40, 105, { align: 'center' });
+      doc.text('www.prestafacil.app', 40, 110, { align: 'center' });
+
+      doc.save(`Recibo_${client.replace(/\s+/g, '_')}.pdf`);
+      toast.success("Recibo generado");
+    } catch (e) {
+      console.error('PDF error:', e);
+      toast.error("Error al generar PDF");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleDownloadSchedulePDF = () => {
+    if (!currentLoan) return;
+    setIsSubmitting(true);
+    try {
+      const schedule = calculateSchedule(currentLoan);
+      const totalRows = schedule.length;
+      const rowHeight = 8;
+      const headerHeight = 70;
+      const footerHeight = 20;
+      const dynamicHeight = headerHeight + (totalRows * rowHeight) + footerHeight;
+
+      const doc = new jsPDF({
+        orientation: 'p',
+        unit: 'mm',
+        format: [80, Math.max(150, dynamicHeight)] // Long ticket format for WhatsApp/Mobile
+      });
+
+      const client = currentLoan.client;
+
+      // Header
+      doc.setFillColor(37, 99, 235);
+      doc.rect(0, 0, 80, 4, 'F');
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(16);
+      doc.text('PRESTAFACIL', 40, 15, { align: 'center' });
+      
+      doc.setFontSize(8);
+      doc.setFont('helvetica', 'normal');
+      doc.text('PLAN DE PAGOS OFICIAL', 40, 20, { align: 'center' });
+
+      doc.setFontSize(7);
+      doc.text(`CLIENTE: ${client.toUpperCase()}`, 10, 32);
+      doc.text(`FECHA INICIO: ${currentLoan.date}`, 10, 37);
+      doc.text(`MONTO ADEUDADO: ${formatMoney(currentLoan.debt)}`, 10, 42);
+      doc.text(`SALDO ACTUAL: ${formatMoney(currentLoan.remaining)}`, 10, 47);
+
+      doc.setDrawColor(226, 232, 240);
+      doc.line(10, 51, 70, 51);
+
+      // Table Header
+      doc.setFont('helvetica', 'bold');
+      doc.text('N.', 10, 57);
+      doc.text('FECHA', 20, 57);
+      doc.text('CUOTA', 45, 57);
+      doc.text('ESTADO', 62, 57);
+      doc.setFont('helvetica', 'normal');
+
+      schedule.forEach((s, i) => {
+        const y = 57 + 8 + (i * 8);
+        doc.text(String(s.num), 10, y);
+        doc.text(s.date.split(' de ')[0] + ' ' + s.date.split(' de ')[1], 20, y); // Short date
+        doc.text(formatMoney(s.amount), 45, y);
+        
+        if (s.status === 'PAGADO') {
+          doc.setTextColor(16, 185, 129);
+        } else if (s.status === 'MORA') {
+          doc.setTextColor(239, 68, 68);
+        } else {
+          doc.setTextColor(37, 99, 235);
+        }
+        doc.text(s.status, 62, y);
+        doc.setTextColor(0, 0, 0);
+      });
+
+      const finalY = 62 + 8 + (totalRows * 8) + 10;
+      doc.setFontSize(6);
+      doc.text('Este documento es un compromiso de pago.', 40, finalY, { align: 'center' });
+      doc.text('www.prestafacil.app', 40, finalY + 4, { align: 'center' });
+
+      doc.save(`Plan_${client.replace(/\s+/g, '_')}.pdf`);
+      toast.success("PDF generado (Optimizado para WhatsApp)");
+    } catch (e) {
+      console.error('PDF error:', e);
+      toast.error("Error al generar PDF");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleRenewLoan = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user || !currentLoan) return;
+    setFormError(null);
+
+    const cap = parseFloat(renewForm.capital);
+    const inst = parseInt(renewForm.installments);
+    
+    if (isNaN(cap) || cap <= 0) return setFormError("El capital debe ser mayor a 0.");
+    if (isNaN(inst) || inst <= 0) return setFormError("Cuotas inválidas.");
+    if (inst > 5000) return setFormError("Máximo 5000 cuotas permitidas.");
+
+    const amountToSettle = currentLoan.remaining;
+    const netToDeliver = cap - amountToSettle;
+
+    if (netToDeliver > totals.caja) {
+      return setFormError(`Caja insuficiente. Necesita entregar ${formatMoney(netToDeliver)} pero solo hay ${formatMoney(totals.caja)}.`);
+    }
+
+    let total = 0;
+    if (renewForm.calcMethod === 'fija') {
+      const fixed = parseFloat(renewForm.fixedQuota);
+      if (isNaN(fixed) || fixed <= 0) return setFormError("Sueldo de cuota inválido.");
+      total = fixed * inst;
+    } else {
+      const rate = parseFloat(renewForm.interestRate);
+      if (isNaN(rate) || rate < 0) return setFormError("Tasa inválida.");
+      total = cap + (cap * (rate / 100));
+    }
+
+    setIsSubmitting(true);
+    try {
+      const batch = writeBatch(db);
+
+      // 1. Mark current as RENEWED
+      const oldLoanRef = doc(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'loans', currentLoan.id);
+      batch.update(oldLoanRef, { status: 'RENOVADO', remaining: 0 });
+
+      // 2. Create NEW loan
+      const newLoanRef = doc(collection(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'loans'));
+      const loanData = { 
+        client: currentLoan.client, 
+        phone: currentLoan.phone, 
+        idNumber: currentLoan.idNumber || '', 
+        address: currentLoan.address || '', 
+        workplace: currentLoan.workplace || '',
+        date: new Date().toLocaleDateString('es-DO'), 
+        progress: 0, 
+        debt: Number(total.toFixed(2)), 
+        remaining: Number(total.toFixed(2)), 
+        principal: cap, 
+        status: 'ACTIVO' as const, 
+        freqDays: parseInt(newLoanForm.freqDays), // Reuse freq from main form or add to renew
+        installments: inst,
+        interestRate: renewForm.calcMethod === 'interes' ? parseFloat(renewForm.interestRate) : null,
+        fixedQuota: renewForm.calcMethod === 'fija' ? parseFloat(renewForm.fixedQuota) : null
+      };
+      batch.set(newLoanRef, loanData);
+
+      // 3. Register transaction (net out)
+      if (netToDeliver > 0) {
+        const transRef = doc(collection(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'transactions'));
+        batch.set(transRef, { 
+          type: 'RETIRO', 
+          amount: netToDeliver, 
+          concept: `Renovación - ${currentLoan.client} (Nuevo: ${formatMoney(cap)} - Saldo Ant: ${formatMoney(amountToSettle)})`, 
+          date: new Date().toISOString() 
+        });
+      } else if (netToDeliver < 0) {
+        // This case is unlikely (borrowing less than remaining), but handle just in case
+        const transRef = doc(collection(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'transactions'));
+        batch.set(transRef, { 
+          type: 'INYECCION', 
+          amount: Math.abs(netToDeliver), 
+          concept: `Renovación con Saldo Positivo - ${currentLoan.client}`, 
+          date: new Date().toISOString() 
+        });
+      }
+
+      await batch.commit();
+      setShowRenewModal(false);
+      setSystemMessage(`✅ Préstamo renovado con éxito. Se entregó ${formatMoney(Math.max(0, netToDeliver))} neto.`);
+      setRenewForm({ capital: '', calcMethod: 'interes', interestRate: '', fixedQuota: '', installments: '' });
+    } catch (err) {
+      console.error(err);
+      setFormError("Error al procesar renovación.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   const printElement = (elementId: string) => {
     const content = document.getElementById(elementId);
     if (!content) return;
@@ -260,16 +632,29 @@ export default function App() {
   const calculateSchedule = (loan: Loan) => {
     if (!loan) return [];
     const schedule = [];
-    const startDate = new Date(); // Asumimos hoy para nuevos, o la fecha del préstamo
+    
+    // Parse loan starting date correctly
+    let startDate = new Date();
+    if (loan.date) {
+      const parts = loan.date.split('/');
+      if (parts.length === 3) {
+        // dd/mm/yyyy -> mm/dd/yyyy for Date constructor
+        startDate = new Date(`${parts[1]}/${parts[0]}/${parts[2]}`);
+      }
+    }
+    
     const freq = Number(loan.freqDays || 15);
     const totalInst = Math.max(1, Number(loan.installments || 1));
     const quotaAmount = (Number(loan.debt || 0) / totalInst);
     
     let totalPaid = Number(loan.debt || 0) - Number(loan.remaining || 0);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
 
     for (let i = 1; i <= totalInst; i++) {
       const dueDate = new Date(startDate);
       dueDate.setDate(startDate.getDate() + (freq * i));
+      dueDate.setHours(0, 0, 0, 0);
       
       let isPaid = false;
       if (totalPaid >= (quotaAmount - 0.01)) {
@@ -279,11 +664,27 @@ export default function App() {
         totalPaid = 0;
       }
 
+      // Late Fee (Mora) calculation
+      let moraAmount = 0;
+      let status = isPaid ? 'PAGADO' : 'PENDIENTE';
+      
+      if (!isPaid && today > dueDate) {
+        const diffTimeOverdue = Math.abs(today.getTime() - dueDate.getTime());
+        const diffDaysOverdue = Math.floor(diffTimeOverdue / (1000 * 60 * 60 * 24));
+        if (diffDaysOverdue > 0) {
+          const moraRateDaily = 0.05; // 5% daily as per contract
+          moraAmount = quotaAmount * moraRateDaily * diffDaysOverdue;
+          status = 'MORA';
+        }
+      }
+
       schedule.push({ 
         num: i, 
         date: dueDate.toLocaleDateString('es-DO', {day: '2-digit', month: 'short', year: 'numeric'}), 
-        amount: quotaAmount,
-        status: isPaid ? 'PAGADO' : 'PENDIENTE'
+        amount: quotaAmount + moraAmount,
+        baseAmount: quotaAmount,
+        mora: moraAmount,
+        status: status
       });
     }
     return schedule;
@@ -302,7 +703,7 @@ export default function App() {
     
     if (isNaN(cap) || cap <= 0) return setFormError("El capital debe ser mayor a 0.");
     if (isNaN(inst) || inst <= 0) return setFormError("La cantidad de cuotas debe ser válida.");
-    if (inst > 500) return setFormError("Máximo 500 cuotas permitidas.");
+    if (inst > 5000) return setFormError("Máximo 5000 cuotas permitidas.");
 
     let total = 0;
     if (newLoanForm.calcMethod === 'fija') {
@@ -380,6 +781,9 @@ export default function App() {
         concept: `Abono Cuota - ${currentLoan.client}`, 
         date: new Date().toISOString() 
       });
+
+      sendPaymentAlert(currentLoan.client, monto);
+
       setShowPaymentModal(false); 
       setShowReceiptModal(true);
     } catch (err) { setFormError("Error al registrar pago."); }
@@ -463,7 +867,8 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-brand-bg text-brand-text pb-20 overflow-x-hidden selection:bg-brand-primary/30">
+    <div className="min-h-screen bg-brand-bg text-brand-text pb-20 overflow-x-hidden selection:bg-brand-primary/20">
+      <Toaster position="top-right" richColors />
       <style>{`
         @media print {
           nav, aside, .no-print { display: none !important; }
@@ -487,6 +892,13 @@ export default function App() {
           </div>
         </div>
         <div className="flex gap-2">
+          <button 
+            onClick={() => setIsDarkMode(!isDarkMode)} 
+            className="flex items-center justify-center bg-brand-secondary text-brand-text/70 border border-brand-border h-10 w-10 rounded-lg hover:bg-brand-secondary/80 transition-all shadow-sm"
+            title={isDarkMode ? 'Cambiar a Modo Claro' : 'Cambiar a Modo Oscuro'}
+          >
+            {isDarkMode ? <Sun className="w-5 h-5 text-brand-yellow" /> : <Moon className="w-5 h-5 text-brand-primary" />}
+          </button>
           <button onClick={() => setShowMigrationModal(true)} className="hidden md:flex items-center gap-2 bg-brand-secondary text-brand-text/70 border border-brand-border px-4 py-2 rounded-lg text-[10px] font-black uppercase hover:bg-brand-secondary/80 transition-all">
             <Cloud className="w-3.5 h-3.5" /> Respaldos
           </button>
@@ -498,19 +910,22 @@ export default function App() {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
           <motion.div 
             whileHover={{ y: -2 }}
-            className="bg-brand-surface rounded-2xl p-6 relative overflow-hidden border border-brand-border shadow-md"
+            className="bg-[#0f172a] rounded-2xl p-6 relative overflow-hidden border border-white/5 shadow-xl"
           >
             <div className="flex justify-between items-center relative z-10 mb-2">
-              <p className="text-brand-text/40 uppercase tracking-widest text-[9px] font-black">Caja Disponible</p>
+              <p className="text-white/40 uppercase tracking-widest text-[9px] font-black">Caja Disponible</p>
               <button 
                 onClick={() => setShowCashModal(true)} 
-                className="bg-brand-primary text-[10px] px-3 py-1 rounded-md text-white font-bold hover:bg-brand-primary/80 transition-colors"
+                className="bg-white/10 backdrop-blur-md text-[10px] px-3 py-1 rounded-md text-white font-bold hover:bg-white/20 transition-colors border border-white/10"
               >
-                GESTIÓN
+                GESTIONAR
               </button>
             </div>
-            <h2 className="text-3xl font-black text-brand-text tracking-tight font-mono">{formatMoney(totals.caja)}</h2>
-            <Wallet className="absolute -right-4 -bottom-4 w-24 h-24 text-brand-text/5" />
+            <h2 className="text-4xl font-black text-white tracking-tighter font-mono">{formatMoney(totals.caja)}</h2>
+            <Wallet className="absolute -right-4 -bottom-4 w-24 h-24 text-white/5" />
+            <div className="absolute top-0 right-0 p-4 opacity-20">
+               <div className="bg-brand-primary w-2 h-2 rounded-full animate-ping"></div>
+            </div>
           </motion.div>
 
           <div className="bg-brand-surface rounded-2xl p-6 border border-brand-border flex items-center gap-4">
@@ -660,6 +1075,13 @@ export default function App() {
                     <Edit className="w-5 h-5" />
                   </button>
                   <button 
+                    onClick={() => { setCurrentLoan(l); setRenewForm({ capital: '', calcMethod: 'interes', interestRate: '', fixedQuota: '', installments: '' }); setShowRenewModal(true); }}
+                    className="aspect-square bg-brand-yellow/10 text-brand-yellow p-3 rounded-lg hover:bg-brand-yellow/20 transition-all border border-brand-yellow/20"
+                    title="Renovar Préstamo"
+                  >
+                    <ArrowUpRight className="w-5 h-5" />
+                  </button>
+                  <button 
                     onClick={async () => { if(confirm("¿Eliminar registro permanentemente?")) await deleteDoc(doc(db, 'artifacts', APP_DATA_PREFIX, 'users', user?.uid || '', 'loans', l.id)); }}
                     className="aspect-square bg-brand-red/10 text-brand-red p-3 rounded-lg hover:bg-brand-red/20 transition-all border border-brand-red/20"
                   >
@@ -752,26 +1174,35 @@ export default function App() {
                       <span className="text-[10px] font-black uppercase text-brand-text">{currentLoan.client}</span>
                     </div>
                     <div className="flex justify-between border-b border-brand-border pb-2">
-                      <span className="text-[10px] font-bold text-brand-text-muted uppercase">Fecha</span>
-                      <span className="text-[10px] font-black uppercase text-brand-text">{new Date().toLocaleString()}</span>
+                       <span className="text-[10px] font-bold text-brand-text-muted uppercase">Pago Recibido</span>
+                       <span className="text-[10px] font-black uppercase text-brand-text font-mono">{formatMoney(Number(paymentAmount))}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-[10px] font-bold text-brand-text-muted uppercase">Nuevo Saldo</span>
-                      <span className="text-[10px] font-black uppercase text-brand-red font-mono">{formatMoney(currentLoan.remaining)}</span>
+                      <span className="text-[10px] font-bold text-brand-text-muted uppercase">Saldo Pendiente</span>
+                      <span className="text-[10px] font-black uppercase text-brand-red font-mono">
+                        {formatMoney(loans.filter(l => l.client === currentLoan.client && l.status === 'ACTIVO').reduce((acc, curr) => acc + curr.remaining, 0))}
+                      </span>
                     </div>
                   </div>
                 </div>
 
                 <div className="flex flex-col gap-3 no-print">
-                   <button 
-                    onClick={() => {
-                      const text = `🧾 *RECIBO DE PAGO - PRESTAFÁCIL*%0A👤 *Cliente:* ${currentLoan.client}%0A💵 *Monto:* ${formatMoney(Number(paymentAmount))}%0A📉 *Saldo:* ${formatMoney(currentLoan.remaining)}%0A📅 *Fecha:* ${new Date().toLocaleDateString()}%0A✅ _Gracias por su cumplimiento._`;
-                      window.open(`https://wa.me/1${currentLoan.phone.replace(/\D/g, '')}?text=${text}`, '_blank');
-                    }}
-                    className="w-full bg-[#25D366] text-white py-5 rounded-xl font-black text-[10px] uppercase flex items-center justify-center gap-2 shadow-lg shadow-[#25D366]/20 transition-all active:scale-95"
-                   >
-                     <MessageCircle className="w-5 h-5" /> Enviar Recibo WhatsApp
-                   </button>
+                    <button 
+                     onClick={handleDownloadReceiptPDF}
+                     disabled={isSubmitting}
+                     className={`w-full bg-brand-primary text-white py-5 rounded-xl font-black text-[10px] uppercase flex items-center justify-center gap-2 shadow-lg shadow-brand-primary/20 transition-all ${isSubmitting ? 'opacity-50' : 'active:scale-95'}`}
+                    >
+                      {isSubmitting ? 'GENERANDO...' : <><Download className="w-5 h-5" /> DESCARGAR RECIBO PDF</>}
+                    </button>
+                    <button 
+                     onClick={() => {
+                       const text = `🧾 *RECIBO DE PAGO - PRESTAFÁCIL*%0A👤 *Cliente:* ${currentLoan.client}%0A💵 *Monto:* ${formatMoney(Number(paymentAmount))}%0A📉 *Saldo:* ${formatMoney(currentLoan.remaining)}%0A📅 *Fecha:* ${new Date().toLocaleDateString()}%0A✅ _Gracias por su cumplimiento._`;
+                       window.open(`https://wa.me/1${currentLoan.phone.replace(/\D/g, '')}?text=${text}`, '_blank');
+                     }}
+                     className="w-full bg-[#25D366] text-white py-4 rounded-xl font-black text-[10px] uppercase flex items-center justify-center gap-2 shadow-lg shadow-[#25D366]/20 transition-all active:scale-95"
+                    >
+                      <MessageCircle className="w-4 h-4" /> COMPARTIR WHATSAPP
+                    </button>
                    <button 
                     onClick={() => {
                       const nextPay = calculateSchedule(currentLoan).find(s => s.status === 'PENDIENTE');
@@ -781,16 +1212,10 @@ export default function App() {
                     }}
                     className="w-full bg-brand-secondary text-brand-text/70 py-4 rounded-xl font-black text-[10px] uppercase flex items-center justify-center gap-2 border border-brand-border transition-all active:scale-95"
                    >
-                     <Calendar className="w-4 h-4" /> Enviar Recordatorio
+                     <Calendar className="w-4 h-4" /> COMPARTIR PRÓXIMO PAGO
                    </button>
-                   <button 
-                    onClick={() => printElement('receipt-content')}
-                    className="w-full bg-brand-secondary text-brand-text/70 py-5 rounded-xl font-black text-[10px] uppercase flex items-center justify-center gap-2 border border-brand-border transition-all active:scale-95"
-                   >
-                     <Printer className="w-5 h-5" /> Imprimir Recibo
-                   </button>
-                   <button onClick={closeAllModals} className="w-full bg-brand-bg text-brand-text-muted py-5 rounded-xl font-black text-[10px] uppercase border border-brand-border transition-all">
-                     Cerrar
+                   <button onClick={closeAllModals} className="w-full bg-brand-secondary text-brand-text/70 py-5 rounded-xl font-black text-[10px] uppercase border border-brand-border transition-all active:scale-95">
+                     CERRAR
                    </button>
                 </div>
              </div>
@@ -951,6 +1376,105 @@ export default function App() {
           </div>
         )}
 
+        {/* Modal Renovación */}
+        {showRenewModal && currentLoan && (
+          <div className="fixed inset-0 bg-brand-bg/95 z-50 flex items-center justify-center p-4 backdrop-blur-md overflow-y-auto">
+            <motion.div 
+              initial={{ opacity: 0, y: 30 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="bg-brand-surface rounded-2xl w-full max-w-xl shadow-2xl p-10 relative border border-brand-border"
+            >
+              <button onClick={closeAllModals} className="absolute top-8 right-8 text-brand-text/20 hover:text-brand-text">
+                <X className="w-6 h-6" />
+              </button>
+              
+              <div className="mb-8">
+                <h2 className="text-2xl font-black text-brand-text tracking-tight uppercase">RENOVAR PRÉSTAMO</h2>
+                <p className="text-brand-text/40 font-bold text-[10px] uppercase tracking-widest">Renovación para: {currentLoan.client}</p>
+              </div>
+
+              <div className="bg-brand-red/5 border border-brand-red/10 p-6 rounded-2xl mb-8 flex justify-between items-center">
+                <div>
+                  <p className="text-[9px] font-black text-brand-red uppercase tracking-widest mb-1">Saldo Actual a Liquidar</p>
+                  <p className="text-2xl font-black text-brand-red font-mono">{formatMoney(currentLoan.remaining)}</p>
+                </div>
+                <div className="text-right">
+                  <p className="text-[9px] font-black text-brand-text/40 uppercase tracking-widest mb-1">Caja Disponible</p>
+                  <p className="text-lg font-bold text-brand-text font-mono">{formatMoney(totals.caja)}</p>
+                </div>
+              </div>
+
+              <form onSubmit={handleRenewLoan} className="space-y-6">
+                <div>
+                  <label className="block text-[10px] font-black text-brand-primary uppercase tracking-widest mb-2">Nuevo Capital Deseado ($)</label>
+                  <input 
+                    type="number"
+                    required 
+                    value={renewForm.capital}
+                    onChange={(e) => setRenewForm({...renewForm, capital: e.target.value})}
+                    className="w-full border border-brand-border p-4 rounded-xl font-black text-2xl text-brand-primary bg-brand-bg focus:border-brand-primary/50 transition-all outline-none font-mono"
+                    placeholder="0.00"
+                  />
+                  {renewForm.capital && (
+                    <p className="mt-2 text-[10px] font-black uppercase text-brand-text/50">
+                      Entregar al cliente neto: <span className="text-brand-green">{formatMoney(parseFloat(renewForm.capital) - currentLoan.remaining)}</span>
+                    </p>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="flex-1">
+                    <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2">Utilidad</label>
+                    <div className="flex gap-2">
+                      <select 
+                        value={renewForm.calcMethod}
+                        onChange={(e) => setRenewForm({...renewForm, calcMethod: e.target.value})}
+                        className="bg-brand-secondary border border-brand-border p-3 rounded-xl font-black text-[9px] uppercase outline-none text-brand-text"
+                      >
+                        <option value="interes">% TASA</option>
+                        <option value="fija">$ CUOTA</option>
+                      </select>
+                      <input 
+                        type="number"
+                        required 
+                        value={renewForm.calcMethod === 'interes' ? renewForm.interestRate : renewForm.fixedQuota}
+                        onChange={(e) => setRenewForm({...renewForm, [renewForm.calcMethod === 'interes' ? 'interestRate' : 'fixedQuota']: e.target.value})}
+                        className="w-full border border-brand-border p-4 rounded-xl font-bold bg-brand-bg text-brand-text focus:border-brand-primary/50 outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2">Cuotas</label>
+                    <input 
+                      type="number"
+                      required 
+                      value={renewForm.installments}
+                      onChange={(e) => setRenewForm({...renewForm, installments: e.target.value})}
+                      className="w-full border border-brand-border p-4 rounded-xl font-bold bg-brand-bg text-brand-text focus:border-brand-primary/50 outline-none font-mono"
+                    />
+                  </div>
+                </div>
+
+                <button 
+                  type="submit"
+                  disabled={isSubmitting}
+                  className={`w-full bg-brand-primary text-white py-5 rounded-xl font-black uppercase text-[10px] tracking-widest shadow-xl shadow-brand-primary/20 transition-all ${isSubmitting ? 'opacity-50' : 'hover:bg-brand-primary/80 active:scale-[0.98]'}`}
+                >
+                  {isSubmitting ? 'PROCESANDO...' : 'PROCESAR RENOVACIÓN'}
+                </button>
+
+                {formError && (
+                  <div className="bg-brand-red/10 border border-brand-red/20 p-4 rounded-xl flex items-center gap-3">
+                    <AlertCircle className="w-5 h-5 text-brand-red shrink-0" />
+                    <p className="text-[10px] font-black text-brand-red uppercase tracking-tight">{formError}</p>
+                  </div>
+                )}
+              </form>
+            </motion.div>
+          </div>
+        )}
+
         {/* Modal Plan de Pagos */}
         {showScheduleModal && currentLoan && (
           <div className="fixed inset-0 bg-brand-bg/95 z-50 flex items-center justify-center p-4 backdrop-blur-md">
@@ -979,7 +1503,46 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="flex-1 overflow-y-auto px-8 py-6 space-y-3 bg-brand-bg shadow-inner">
+                  <div className="flex-1 overflow-y-auto p-10 bg-white text-slate-900 selection:bg-brand-primary" id="schedule-content">
+                    <div className="text-center mb-8 border-b-2 border-brand-primary pb-4">
+                      <h2 className="text-4xl font-black text-brand-primary uppercase tracking-tighter">PRESTAFÁCIL</h2>
+                      <p className="text-[10px] font-black tracking-[0.3em] text-slate-400 uppercase mt-2">Plan de Pagos Detallado</p>
+                    </div>
+                    
+                    <div className="grid grid-cols-2 gap-8 mb-8 text-[10px]">
+                       <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                          <p className="text-[9px] font-black text-slate-400 uppercase mb-1">Cliente</p>
+                          <p className="font-bold uppercase text-slate-900">{currentLoan.client}</p>
+                       </div>
+                       <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                          <p className="text-[9px] font-black text-slate-400 uppercase mb-1">Monto Adeudado</p>
+                          <p className="font-bold text-slate-900">{formatMoney(currentLoan.debt)}</p>
+                       </div>
+                    </div>
+
+                    <table className="w-full text-left">
+                       <thead>
+                          <tr className="border-b-2 border-slate-100">
+                             <th className="py-2 text-[10px] font-black text-slate-400 uppercase">No.</th>
+                             <th className="py-2 text-[10px] font-black text-slate-400 uppercase">Vencimiento</th>
+                             <th className="py-2 text-[10px] font-black text-slate-400 uppercase text-right">Monto</th>
+                             <th className="py-2 text-[10px] font-black text-slate-400 uppercase text-right">Estado</th>
+                          </tr>
+                       </thead>
+                       <tbody className="divide-y divide-slate-100">
+                          {calculateSchedule(currentLoan).map(s => (
+                             <tr key={s.num}>
+                                <td className="py-3 font-bold text-xs text-slate-900">{s.num}</td>
+                                <td className="py-3 font-bold text-xs text-slate-900">{s.date}</td>
+                                <td className="py-3 font-bold text-xs text-right font-mono text-slate-900">{formatMoney(s.amount)}</td>
+                                <td className={`py-3 font-black text-[9px] text-right uppercase ${s.status === 'PAGADO' ? 'text-brand-green' : s.status === 'MORA' ? 'text-brand-red' : 'text-brand-primary'}`}>{s.status}</td>
+                             </tr>
+                          ))}
+                       </tbody>
+                    </table>
+                  </div>
+
+                  <div className="flex-1 overflow-y-auto px-8 py-6 space-y-3 bg-brand-bg shadow-inner">
                 {calculateSchedule(currentLoan).map((s) => (
                   <div key={s.num} className={`bg-brand-surface p-4 rounded-xl border border-brand-border flex justify-between items-center ${s.status === 'PAGADO' ? 'opacity-30' : 'shadow-sm'}`}>
                     <div className="flex items-center gap-4">
@@ -987,11 +1550,14 @@ export default function App() {
                         {s.num}
                       </div>
                       <div>
-                        <p className="font-black text-sm text-brand-text font-mono">{formatMoney(s.amount)}</p>
+                        <p className="font-black text-sm text-brand-text font-mono">
+                          {formatMoney(s.amount)}
+                          {s.mora > 0 && <span className="text-[9px] text-brand-red ml-2 uppercase">Incluye Mora {formatMoney(s.mora)}</span>}
+                        </p>
                         <p className="text-[9px] font-bold text-brand-text/30 uppercase">{s.date}</p>
                       </div>
                     </div>
-                    <div className={`text-[9px] font-black uppercase px-3 py-1.5 rounded border ${s.status === 'PAGADO' ? 'bg-brand-green/10 text-brand-green border-brand-green/20' : 'bg-brand-primary/10 text-brand-primary border-brand-primary/20'}`}>
+                    <div className={`text-[9px] font-black uppercase px-3 py-1.5 rounded border ${s.status === 'PAGADO' ? 'bg-brand-green/10 text-brand-green border-brand-green/20' : s.status === 'MORA' ? 'bg-brand-red/10 text-brand-red border-brand-red/20' : 'bg-brand-primary/10 text-brand-primary border-brand-primary/20'}`}>
                       {s.status === 'PAGADO' ? <Check className="w-3 h-3" /> : s.status}
                     </div>
                   </div>
@@ -1000,16 +1566,17 @@ export default function App() {
 
               <div className="p-8 border-t border-brand-border flex gap-4 bg-brand-surface">
                 <button 
-                  onClick={() => window.print()}
-                  className="flex-1 bg-brand-secondary text-brand-text/70 py-4 rounded-xl font-black uppercase text-[10px] tracking-widest flex items-center justify-center gap-2 border border-brand-border hover:bg-brand-secondary/80 transition-all font-mono"
+                  onClick={handleDownloadSchedulePDF}
+                  disabled={isSubmitting}
+                  className="flex-1 bg-brand-primary text-white py-4 rounded-xl font-black uppercase text-[10px] tracking-widest flex items-center justify-center gap-2 shadow-lg shadow-brand-primary/20 hover:bg-brand-primary/90 transition-all font-mono"
                 >
-                  <Printer className="w-4 h-4" /> IMPRIMIR PLAN
+                  <Download className="w-4 h-4" /> DESCARGAR PLAN PARA WHATSAPP
                 </button>
                 <button 
                   onClick={closeAllModals}
                   className="flex-1 bg-brand-primary text-white py-4 rounded-xl font-black uppercase text-[10px] tracking-widest shadow-lg shadow-brand-primary/20 hover:bg-brand-primary/80 transition-all"
                 >
-                  CERRAR VENTANA
+                  CERRAR
                 </button>
               </div>
             </motion.div>
@@ -1109,24 +1676,24 @@ export default function App() {
 
         {/* Modal Contrato */}
         {showContractModal && currentLoan && (
-          <div className="fixed inset-0 bg-brand-bg/95 z-50 flex items-center justify-center p-4 backdrop-blur-md overflow-y-auto pt-10 pb-10">
+          <div className="fixed inset-0 bg-brand-bg/95 z-50 flex items-center justify-center p-4 backdrop-blur-sm overflow-y-auto">
             <motion.div 
-              initial={{ opacity: 0, scale: 0.98 }}
-              animate={{ opacity: 1, scale: 1 }}
-              className="bg-brand-surface rounded-2xl w-full max-w-2xl shadow-2xl relative flex flex-col max-h-[90vh] border border-brand-border"
+              initial={{ opacity: 0, scale: 0.99, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              className="bg-white rounded-3xl w-full max-w-4xl shadow-[0_0_100px_rgba(0,0,0,0.3)] relative overflow-hidden flex flex-col max-h-[92vh] border border-brand-border"
             >
-              <div className="p-8 border-b border-brand-border flex justify-between items-center bg-gradient-to-r from-brand-surface to-brand-bg">
+              <div className="p-6 border-b border-brand-border flex justify-between items-center bg-slate-50">
                 <div className="flex items-center gap-3">
                   <div className="bg-brand-primary/10 p-2 rounded-lg">
                     <FileText className="w-5 h-5 text-brand-primary" />
                   </div>
-                  <h2 className="text-xl font-black text-brand-text uppercase tracking-tight">Contrato de Préstamo</h2>
+                  <h2 className="text-sm font-black text-slate-900 uppercase tracking-tight">Contrato Digital de Préstamo</h2>
                 </div>
-                <button onClick={closeAllModals} className="text-brand-text-muted hover:text-brand-text"><X /></button>
+                <button onClick={closeAllModals} className="text-slate-400 hover:text-slate-900 transition-colors"><X /></button>
               </div>
 
-              <div className="flex-1 overflow-y-auto p-10 bg-white text-doc-primary selection:bg-brand-primary" id="contract-view">
-                <div className="max-w-2xl mx-auto space-y-8 font-serif leading-relaxed text-justify">
+              <div className="flex-1 overflow-y-auto p-12 bg-white text-slate-900 selection:bg-brand-primary" id="contract-view" style={{ color: '#0f172a' }}>
+                <div className="max-w-2xl mx-auto space-y-10 font-serif leading-relaxed text-justify">
                   <div className="text-center space-y-2 border-b-2 border-doc-primary pb-6 mb-10">
                     <h1 className="text-3xl font-black tracking-tighter uppercase">Pagaré Notarial</h1>
                     <p className="text-[10px] font-black tracking-[0.4em] text-doc-secondary uppercase">PrestaFácil - Servicios Financieros</p>
@@ -1210,8 +1777,63 @@ export default function App() {
                         onclone: (clonedDoc) => {
                           const el = clonedDoc.getElementById('contract-view');
                           if (el) {
+                            clonedDoc.querySelectorAll('style, link').forEach(s => s.remove());
+                            const style = clonedDoc.createElement('style');
+                            style.innerHTML = `
+                              #contract-view { font-family: serif; background: #ffffff; color: #0f172a; line-height: 1.6; }
+                              .max-w-4xl { max-width: 56rem; }
+                              .mx-auto { margin-left: auto; margin-right: auto; }
+                              .p-12 { padding: 3rem; }
+                              .bg-white { background-color: #ffffff; }
+                              .border { border: 1px solid #e2e8f0; }
+                              .shadow-2xl { box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25); }
+                              .rounded-3xl { border-radius: 1.5rem; }
+                              .mb-10 { margin-bottom: 2.5rem; }
+                              .text-4xl { font-size: 2.25rem; }
+                              .font-black { font-weight: 900; }
+                              .text-slate-900 { color: #0f172a; }
+                              .text-slate-400 { color: #94a3b8; }
+                              .text-sm { font-size: 0.875rem; }
+                              .tracking-\\[0\\.3em\\] { letter-spacing: 0.3em; }
+                              .font-bold { font-weight: 700; }
+                              .mb-12 { margin-bottom: 3rem; }
+                              .grid { display: grid; }
+                              .grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+                              .gap-8 { gap: 2rem; }
+                              .p-6 { padding: 1.5rem; }
+                              .bg-slate-50 { background-color: #f8fafc; }
+                              .rounded-2xl { border-radius: 1rem; }
+                              .text-xs { font-size: 0.75rem; }
+                              .text-slate-500 { color: #64748b; }
+                              .text-lg { font-size: 1.125rem; }
+                              .text-slate-800 { color: #1e293b; }
+                              .space-y-8 > * + * { margin-top: 2rem; }
+                              .text-\\[15px\\] { font-size: 15px; }
+                              .text-slate-700 { color: #334155; }
+                              .leading-relaxed { line-height: 1.625; }
+                              .text-justify { text-align: justify; }
+                              .pl-4 { padding-left: 1rem; }
+                              .border-l-4 { border-left-width: 4px; }
+                              .border-blue-600 { border-left-color: #2563eb; }
+                              .italic { font-style: italic; }
+                              .flex { display: flex; }
+                              .justify-between { justify-content: space-between; }
+                              .mt-20 { margin-top: 5rem; }
+                              .text-center { text-align: center; }
+                              .w-48 { width: 12rem; }
+                              .pt-4 { padding-top: 1rem; }
+                              .border-t-2 { border-top-width: 2px; }
+                              .border-slate-200 { border-top-color: #e2e8f0; }
+                              .mb-1 { margin-bottom: 0.25rem; }
+                              .text-slate-600 { color: #475569; }
+                              .text-\\[10px\\] { font-size: 10px; }
+                              .tracking-widest { letter-spacing: 0.1em; }
+                            `;
+                            clonedDoc.head.appendChild(style);
+                            
                             el.style.height = 'auto';
                             el.style.overflow = 'visible';
+                            el.style.width = '210mm'; 
                           }
                         }
                       });
@@ -1370,51 +1992,60 @@ export default function App() {
                 <button onClick={() => setShowMigrationModal(false)} className="text-brand-text/20 hover:text-brand-text"><X /></button>
               </div>
               
-              <div className="grid grid-cols-2 gap-4 mb-8">
-                <button 
-                  onClick={() => {
-                    const data = { loans, transactions };
-                    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a'); a.href = url;
-                    a.download = `respaldo_prestafacil_${new Date().toISOString().slice(0,10)}.json`;
-                    a.click();
-                  }}
-                  className="bg-brand-secondary text-brand-text/70 py-8 rounded-xl font-black uppercase text-[10px] flex flex-col items-center gap-4 hover:bg-brand-secondary/80 transition-all border border-brand-border"
-                >
-                  <Download className="w-6 h-6 text-brand-primary" /> Descargar Copia
-                </button>
-                <button 
-                  className="bg-brand-bg text-brand-text/30 py-8 rounded-xl font-black uppercase text-[10px] flex flex-col items-center gap-4 border border-brand-border cursor-default opacity-50"
-                >
-                  <Upload className="w-6 h-6" /> Importar (Paste)
-                </button>
-              </div>
+              <div className="flex flex-col gap-4">
+                <textarea 
+                  value={migrationText}
+                  onChange={(e) => setMigrationText(e.target.value)}
+                  placeholder="Pegue aquí los datos para restaurar o dele a 'GENERAR COPIA' para ver el respaldo actual..."
+                  className="w-full h-48 bg-brand-bg border border-brand-border shadow-inner rounded-xl p-5 font-mono text-[10px] mb-4 focus:border-brand-primary/50 outline-none text-brand-text"
+                />
 
-              <textarea 
-                value={migrationText}
-                onChange={(e) => setMigrationText(e.target.value)}
-                placeholder="Pegue aquí su archivo JSON de respaldo..."
-                className="w-full h-40 bg-brand-bg border border-brand-border shadow-inner rounded-xl p-5 font-mono text-[10px] mb-8 focus:border-brand-primary/50 outline-none text-brand-text"
-              />
+                <div className="flex gap-4">
+                  <button 
+                    onClick={() => {
+                      const backup = { loans, transactions, timestamp: new Date().toISOString() };
+                      setMigrationText(JSON.stringify(backup, null, 2));
+                      toast.success("Respaldo generado");
+                    }}
+                    className="flex-1 bg-brand-green text-white py-5 rounded-xl font-black uppercase text-[10px] tracking-widest shadow-lg shadow-brand-green/20 transition-all active:scale-95 flex items-center justify-center gap-2"
+                  >
+                    <Download className="w-4 h-4" /> GENERAR COPIA
+                  </button>
+                  <button 
+                    onClick={async () => {
+                      if(!migrationText.trim()) return alert("Pegue los datos primero.");
+                      if(!confirm("⚠️ CUIDADO: Esto reemplazará todo el sistema. ¿Continuar?")) return;
+                      setIsSubmitting(true);
+                      try {
+                        const data = JSON.parse(migrationText);
+                        const batch = writeBatch(db);
+                        loans.forEach(l => batch.delete(doc(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'loans', l.id)));
+                        transactions.forEach(t => batch.delete(doc(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'transactions', t.id)));
 
-              <div className="flex gap-4">
-                 <button 
-                  onClick={async () => {
-                    if(!confirm("⚠️ CUIDADO: Esto reemplazará todos los datos actuales. ¿Continuar?")) return;
-                    try {
-                      const data = JSON.parse(migrationText);
-                      if (!data.loans || !data.transactions) throw new Error();
-                      alert("⚠️ Esta función de carga masiva requiere privilegios de escritura en lote. Contacte soporte.");
-                    } catch { alert("Formato JSON inválido."); }
-                  }}
-                  className="flex-1 bg-brand-red text-white py-5 rounded-xl font-black uppercase text-[10px] tracking-widest shadow-lg shadow-brand-red/20 transition-all active:scale-95"
-                 >
-                   SOBRESCRIBIR SISTEMA
-                 </button>
-                 <button onClick={() => setShowMigrationModal(false)} className="flex-1 bg-brand-secondary text-brand-text/40 py-5 rounded-xl font-black uppercase text-[10px] border border-brand-border transition-all">
-                   CANCELAR
-                 </button>
+                        data.loans.forEach((l: any) => {
+                          const { id, ...clean } = l;
+                          batch.set(doc(collection(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'loans')), clean);
+                        });
+                        data.transactions.forEach((t: any) => {
+                          const { id, ...clean } = t;
+                          batch.set(doc(collection(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'transactions')), clean);
+                        });
+
+                        await batch.commit();
+                        toast.success("Sistema restaurado");
+                        setShowMigrationModal(false);
+                      } catch (e: any) { alert("Error: " + e.message); }
+                      finally { setIsSubmitting(false); }
+                    }}
+                    disabled={isSubmitting}
+                    className="flex-1 bg-brand-red text-white py-5 rounded-xl font-black uppercase text-[10px] tracking-widest shadow-lg shadow-brand-red/20 transition-all active:scale-95 flex items-center justify-center gap-2"
+                  >
+                    <Upload className="w-4 h-4" /> {isSubmitting ? 'PROCESANDO...' : 'RESTAURAR'}
+                  </button>
+                </div>
+                <button onClick={() => setShowMigrationModal(false)} className="w-full bg-brand-secondary text-brand-text/40 py-5 rounded-xl font-black uppercase text-[10px] border border-brand-border transition-all">
+                  CANCELAR
+                </button>
               </div>
             </motion.div>
           </div>

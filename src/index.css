@@ -1,26 +1,44 @@
 @import "tailwindcss";
 
 @theme {
-  --color-brand-bg: #0d0d0d;
-  --color-brand-surface: #181818;
-  --color-brand-card: #111111;
-  --color-brand-border: #2d2d2d;
-  --color-brand-text: #e0e0e0;
-  --color-brand-text-muted: #666666;
-  --color-brand-text-dim: #333333;
-  --color-brand-primary: #007acc;
-  --color-brand-secondary: #2b2b2b;
-  --color-brand-red: #ff5f57;
-  --color-brand-yellow: #febc2e;
-  --color-brand-green: #28c840;
-  --color-doc-primary: #0f172a;
-  --color-doc-secondary: #64748b;
-  --color-doc-accent: #dc2626;
-  --color-doc-bg: #f8fafc;
+  --color-brand-bg: var(--bg);
+  --color-brand-surface: var(--surface);
+  --color-brand-card: var(--card);
+  --color-brand-border: var(--border);
+  --color-brand-text: var(--text);
+  --color-brand-text-muted: var(--text-muted);
+  --color-brand-text-dim: var(--text-dim);
+  --color-brand-primary: #2563eb;
+  --color-brand-secondary: var(--secondary);
+  --color-brand-red: #ef4444;
+  --color-brand-yellow: #f59e0b;
+  --color-brand-green: #10b981;
+}
+
+:root {
+  --bg: #f8fafc;
+  --surface: #ffffff;
+  --card: #ffffff;
+  --border: #e2e8f0;
+  --text: #0f172a;
+  --text-muted: #64748b;
+  --text-dim: #94a3b8;
+  --secondary: #f1f5f9;
+}
+
+.dark {
+  --bg: #020617;
+  --surface: #0f172a;
+  --card: #1e293b;
+  --border: #1e293b;
+  --text: #f8fafc;
+  --text-muted: #94a3b8;
+  --text-dim: #475569;
+  --secondary: #1e293b;
 }
 
 @layer base {
   body {
-    @apply bg-brand-bg text-brand-text/90 font-sans antialiased selection:bg-brand-primary/30;
+    @apply bg-brand-bg text-brand-text font-sans antialiased selection:bg-brand-primary/20;
   }
 }
