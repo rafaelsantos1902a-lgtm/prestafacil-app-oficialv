@@ -18,25 +18,17 @@ import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
 
 import { initializeApp } from 'firebase/app';
-import { getAuth, signInAnonymously, onAuthStateChanged, User as FirebaseUser, GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
+import { getAuth, signInAnonymously, onAuthStateChanged, User as FirebaseUser, GoogleAuthProvider, signInWithPopup, signOut, createUserWithEmailAndPassword, signInWithEmailAndPassword } from 'firebase/auth';
 import { 
   getFirestore, collection, onSnapshot, doc, addDoc, updateDoc, 
   deleteDoc, writeBatch, query, orderBy, getDocFromServer 
 } from 'firebase/firestore';
 
-// 1. CONFIGURACIÓN FIREBASE
-const firebaseConfig = {
-  apiKey: "AIzaSyCBKn0LYIjkSc27lBJ6nzm-V4h2SdI7uz4",
-  authDomain: "prestafacil-4e73a.firebaseapp.com",
-  projectId: "prestafacil-4e73a",
-  storageBucket: "prestafacil-4e73a.firebasestorage.app",
-  messagingSenderId: "48360971872",
-  appId: "1:48360971872:web:ccbc86eab3deef1e3e6d05"
-};
+import firebaseConfig from '../firebase-applet-config.json';
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
-const db = getFirestore(app);
+const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 
 const APP_DATA_PREFIX = 'prestafacil-v1';
 const PIN_ACCESO = "1234";
@@ -84,6 +76,9 @@ export default function App() {
     return false;
   });
   const [authError, setAuthError] = useState<string | null>(null);
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [isSyncing, setIsSyncing] = useState(false);
   const [systemMessage, setSystemMessage] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
@@ -127,7 +122,33 @@ export default function App() {
       await signInWithPopup(auth, provider);
     } catch (error: any) {
       console.error("Login error:", error);
-      setAuthError("Error al iniciar sesión: " + error.message);
+      if (error.code === 'auth/unauthorized-domain') {
+        setAuthError("ERROR DE DOMINIO: El dominio de esta aplicación no está autorizado en tu consola de Firebase (Authentication > Settings > Authorized domains). Copia la URL de la barra de navegación y agrégala allí.");
+      } else {
+        setAuthError("Error al iniciar sesión: " + error.message);
+      }
+    }
+  };
+
+  const loginWithEmail = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!email || !password) return;
+    setAuthError(null);
+    try {
+      if (authMode === 'login') {
+        await signInWithEmailAndPassword(auth, email, password);
+      } else {
+        await createUserWithEmailAndPassword(auth, email, password);
+        toast.success("Cuenta creada exitosamente");
+      }
+    } catch (error: any) {
+      console.error("Email auth error:", error);
+      let msg = "Error: " + error.message;
+      if (error.code === 'auth/user-not-found') msg = "Usuario no encontrado.";
+      if (error.code === 'auth/wrong-password') msg = "Contraseña incorrecta.";
+      if (error.code === 'auth/email-already-in-use') msg = "El correo ya está en uso.";
+      if (error.code === 'auth/invalid-email') msg = "Correo inválido.";
+      setAuthError(msg);
     }
   };
 
@@ -876,39 +897,94 @@ export default function App() {
         <motion.div 
           initial={{ opacity: 0, scale: 0.95 }} 
           animate={{ opacity: 1, scale: 1 }}
-          className="bg-brand-surface rounded-2xl p-10 w-full max-w-md border border-brand-border shadow-2xl text-center"
+          className="bg-brand-surface rounded-2xl p-10 w-full max-w-md border border-brand-border shadow-2xl"
         >
           <div className="bg-brand-secondary w-20 h-20 rounded-2xl flex items-center justify-center mx-auto mb-6 border border-brand-border">
             <ShieldCheck className="w-10 h-10 text-brand-primary" />
           </div>
-          <h1 className="text-3xl font-black text-brand-text mb-2 tracking-tight uppercase">Sincronización</h1>
-          <p className="text-brand-text/50 font-bold mb-8 uppercase text-[10px] tracking-widest leading-relaxed">
-            Inicia sesión para ver tus préstamos en cualquier dispositivo.
+          <h1 className="text-3xl font-black text-brand-text mb-2 tracking-tight uppercase text-center">Cloud Sync</h1>
+          <p className="text-brand-text/50 font-bold mb-8 uppercase text-[10px] tracking-widest leading-relaxed text-center">
+            Sincroniza tus datos entre dispositivos de forma profesional.
           </p>
           
-          <div className="space-y-3">
-            <button 
-              onClick={loginWithGoogle}
-              className="w-full bg-white text-slate-900 py-4 rounded-xl font-black flex items-center justify-center gap-3 shadow-lg hover:bg-slate-50 active:scale-95 transition-all text-xs border border-slate-200"
-            >
-              <img src="https://www.gstatic.com/firebase/explore/google.svg" className="w-4 h-4" alt="Google" />
-              ACCEDER CON GOOGLE
-            </button>
-            
-            <div className="relative py-4">
+          <div className="space-y-6">
+            <form onSubmit={loginWithEmail} className="space-y-4">
+              <div className="space-y-2">
+                <label className="text-[10px] font-black uppercase text-brand-text/40 ml-1">Correo Electrónico</label>
+                <div className="relative">
+                  <User className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-brand-text/30" />
+                  <input 
+                    type="email" 
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    className="w-full bg-brand-secondary border border-brand-border rounded-xl py-4 pl-12 pr-4 text-sm text-brand-text focus:outline-none focus:border-brand-primary/50 transition-all font-medium"
+                    placeholder="usuario@correo.com"
+                  />
+                </div>
+              </div>
+              
+              <div className="space-y-2">
+                <label className="text-[10px] font-black uppercase text-brand-text/40 ml-1">Contraseña</label>
+                <div className="relative">
+                  <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-brand-text/30" />
+                  <input 
+                    type="password" 
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    className="w-full bg-brand-secondary border border-brand-border rounded-xl py-4 pl-12 pr-4 text-sm text-brand-text focus:outline-none focus:border-brand-primary/50 transition-all font-medium"
+                    placeholder="••••••••"
+                  />
+                </div>
+              </div>
+
+              <button 
+                type="submit"
+                className="w-full bg-brand-primary text-white py-4 rounded-xl font-black uppercase text-[10px] tracking-widest shadow-lg shadow-brand-primary/20 hover:brightness-110 active:scale-95 transition-all"
+              >
+                {authMode === 'login' ? 'Iniciar Sesión' : 'Crear Cuenta'}
+              </button>
+
+              <p className="text-center">
+                <button 
+                  type="button"
+                  onClick={() => setAuthMode(authMode === 'login' ? 'register' : 'login')}
+                  className="text-[10px] font-black uppercase text-brand-primary hover:underline"
+                >
+                  {authMode === 'login' ? '¿No tienes cuenta? Regístrate' : '¿Ya tienes cuenta? Inicia sesión'}
+                </button>
+              </p>
+            </form>
+
+            <div className="relative py-2">
               <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-brand-border"></div></div>
-              <div className="relative flex justify-center text-[8px] font-black uppercase text-brand-text/30 bg-brand-surface px-2">o</div>
+              <div className="relative flex justify-center text-[8px] font-black uppercase text-brand-text/30 bg-brand-surface px-2">o utilizar</div>
             </div>
 
-            <button 
-              onClick={loginAnonymously}
-              className="w-full bg-brand-secondary text-brand-text/70 py-4 rounded-xl font-black uppercase text-[10px] tracking-widest hover:bg-brand-secondary/80 active:scale-95 transition-all border border-brand-border"
-            >
-              Invitado (No sincroniza)
-            </button>
+            <div className="grid grid-cols-2 gap-3">
+              <button 
+                onClick={loginWithGoogle}
+                className="bg-white text-slate-900 py-4 rounded-xl font-black flex items-center justify-center gap-2 shadow-sm hover:bg-slate-50 active:scale-95 transition-all text-[9px] border border-slate-200"
+              >
+                <img src="https://www.gstatic.com/firebase/explore/google.svg" className="w-4 h-4" alt="Google" />
+                GOOGLE
+              </button>
+              
+              <button 
+                onClick={loginAnonymously}
+                className="bg-brand-secondary text-brand-text/70 py-4 rounded-xl font-black uppercase text-[9px] tracking-tight hover:bg-brand-secondary/80 active:scale-95 transition-all border border-brand-border"
+              >
+                Invitado
+              </button>
+            </div>
           </div>
 
-          {authError && <p className="mt-6 text-brand-red font-bold text-[10px] uppercase tracking-wide leading-relaxed">{authError}</p>}
+          {authError && (
+            <div className="mt-6 p-4 bg-brand-red/10 border border-brand-red/20 rounded-xl">
+              <p className="text-brand-red font-bold text-[10px] uppercase tracking-wide leading-relaxed text-center">
+                {authError}
+              </p>
+            </div>
+          )}
         </motion.div>
       </div>
     );

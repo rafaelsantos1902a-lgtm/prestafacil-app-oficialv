@@ -1,22 +1,30 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // 0. Global safety net
+    // 0. Global safety net - Default Deny
     match /{document=**} {
       allow read, write: if false;
     }
 
-    // 0.1 Common helpers
+    // 0.1 Global Helpers
     function isSignedIn() {
       return request.auth != null;
     }
-
+    
     function isOwner(userId) {
       return isSignedIn() && request.auth.uid == userId;
     }
 
     function isValidId(id) {
       return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
     }
 
     // Pillar 2: Validation Blueprints
@@ -45,40 +53,50 @@ service cloud.firestore {
         && data.type in ['INYECCION', 'RETIRO']
         && data.amount is number && data.amount >= 0
         && data.concept is string && data.concept.size() <= 500
-        && data.date is string && data.date.size() <= 40;
+        && data.date is string && data.date.size() <= 60;
     }
 
-    // Match rules
+    // Match Rules
     match /artifacts/prestafacil-v1/users/{userId} {
-      // User path hardening
-      allow get: if isOwner(userId) && isValidId(userId);
-
+      allow get: if isOwner(userId);
+      
       match /loans/{loanId} {
         // Pillar 8: Secure List Queries
         allow list: if isOwner(userId);
-        allow get: if isOwner(userId) && isValidId(loanId);
+        allow get: if isOwner(userId);
         
-        allow create: if isOwner(userId) && isValidLoan(request.resource.data) && isValidId(loanId);
+        allow create: if isOwner(userId) 
+          && isValidLoan(incoming()) 
+          && isValidId(loanId);
         
-        allow update: if isOwner(userId) && isValidLoan(request.resource.data) && (
-          // Action: Edit
-          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['client', 'phone', 'idNumber', 'address', 'workplace', 'status', 'remaining']) ||
-          // Action: Process Payment
-          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['remaining', 'progress', 'status']) ||
-          // Action: Renew
-          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'remaining'])
-        );
+        allow update: if isOwner(userId) 
+          && isValidLoan(incoming())
+          && (
+            // Identity Integrity
+            incoming().client == existing().client &&
+            incoming().principal == existing().principal &&
+            
+            // Action: Edit Profile
+            (incoming().diff(existing()).affectedKeys().hasOnly(['phone', 'idNumber', 'address', 'workplace', 'status', 'remaining', 'progress', 'interestRate', 'fixedQuota'])) ||
+            // Action: Process Payment
+            (incoming().diff(existing()).affectedKeys().hasOnly(['remaining', 'progress', 'status'])) ||
+            // Action: Renew
+            (incoming().diff(existing()).affectedKeys().hasOnly(['status', 'remaining', 'progress']))
+          );
         
-        allow delete: if isOwner(userId) && isValidId(loanId);
+        allow delete: if isOwner(userId);
       }
 
       match /transactions/{transactionId} {
         allow list: if isOwner(userId);
-        allow get: if isOwner(userId) && isValidId(transactionId);
+        allow get: if isOwner(userId);
         
-        allow create: if isOwner(userId) && isValidTransaction(request.resource.data) && isValidId(transactionId);
+        allow create: if isOwner(userId) 
+          && isValidTransaction(incoming()) 
+          && isValidId(transactionId);
+          
         allow update: if false; // Transactions are immutable
-        allow delete: if isOwner(userId) && isValidId(transactionId);
+        allow delete: if isOwner(userId);
       }
     }
   }

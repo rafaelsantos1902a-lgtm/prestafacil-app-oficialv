@@ -4,5 +4,5 @@ export default [
   {
     ignores: ['dist/**/*']
   },
-  ...firebaseRulesPlugin.configs['flat/recommended']
+  firebaseRulesPlugin.configs['flat/recommended']
 ];
