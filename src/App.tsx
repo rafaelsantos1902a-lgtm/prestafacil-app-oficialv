@@ -145,7 +145,8 @@ export default function App() {
       console.error("Email auth error:", error);
       let msg = "Error: " + error.message;
       if (error.code === 'auth/operation-not-allowed') {
-        msg = "ERROR: Debes habilitar 'Correo electrónico/Contraseña' en tu consola de Firebase (Authentication > Sign-in method).";
+        const consoleLink = `https://console.firebase.google.com/project/${firebaseConfig.projectId}/authentication/providers`;
+        msg = `ERROR: Debes habilitar 'Correo electrónico/Contraseña' en tu consola de Firebase. \n1. Entra aquí: ${consoleLink} \n2. Haz clic en 'Correo electrónico/Contraseña' y actívalo. \n3. No olvides pulsar en 'Guardar'.`;
       } else if (error.code === 'auth/user-not-found') {
         msg = "Usuario no encontrado.";
       } else if (error.code === 'auth/wrong-password') {
@@ -2187,7 +2188,7 @@ export default function App() {
               <div className="flex justify-between items-start mb-8">
                 <div>
                   <h2 className="text-2xl font-black mb-1 uppercase tracking-tight text-brand-text">RESPALDO DE DATOS</h2>
-                  <p className="text-brand-text/30 font-bold text-[10px] uppercase tracking-widest">Sincronización manual de registros</p>
+                  <p className="text-brand-text/30 font-bold text-[10px] uppercase tracking-widest">Respaldo y Transferencia Manual</p>
                 </div>
                 <button onClick={() => setShowMigrationModal(false)} className="text-brand-text/20 hover:text-brand-text"><X /></button>
               </div>
