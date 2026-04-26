@@ -18,7 +18,11 @@ import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
 
 import { initializeApp } from 'firebase/app';
-import { getAuth, signInAnonymously, onAuthStateChanged, User as FirebaseUser, GoogleAuthProvider, signInWithPopup, signOut, createUserWithEmailAndPassword, signInWithEmailAndPassword } from 'firebase/auth';
+import { 
+  getAuth, signInAnonymously, onAuthStateChanged, User as FirebaseUser, 
+  GoogleAuthProvider, signInWithPopup, signOut, createUserWithEmailAndPassword, 
+  signInWithEmailAndPassword, sendPasswordResetEmail 
+} from 'firebase/auth';
 import { 
   getFirestore, collection, onSnapshot, doc, addDoc, updateDoc, 
   deleteDoc, writeBatch, query, orderBy, getDocFromServer 
@@ -130,9 +134,18 @@ export default function App() {
     }
   };
 
+  const ALLOWED_EMAIL = "rafaelsantos1902a@gmail.com";
+
   const loginWithEmail = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!email || !password) return;
+    
+    // Restricción de correo
+    if (email.toLowerCase() !== ALLOWED_EMAIL) {
+      setAuthError("ACCESO DENEGADO: Por el momento, este sistema es para uso exclusivo del administrador autorizado.");
+      return;
+    }
+
     setAuthError(null);
     try {
       if (authMode === 'login') {
@@ -157,6 +170,19 @@ export default function App() {
         msg = "Correo inválido.";
       }
       setAuthError(msg);
+    }
+  };
+
+  const handleResetPassword = async () => {
+    if (!email) {
+      setAuthError("Por favor, ingresa tu correo electrónico para enviarte el enlace de recuperación.");
+      return;
+    }
+    try {
+      await sendPasswordResetEmail(auth, email);
+      toast.success("Se ha enviado un correo para restablecer tu contraseña. Revisa tu bandeja de entrada o spam.");
+    } catch (error: any) {
+      setAuthError("Error: " + error.message);
     }
   };
 
@@ -954,15 +980,28 @@ export default function App() {
                 {authMode === 'login' ? 'ENTRAR AL SISTEMA' : 'CREAR CUENTA'}
               </button>
 
-              <p className="text-center">
-                <button 
-                  type="button"
-                  onClick={() => setAuthMode(authMode === 'login' ? 'register' : 'login')}
-                  className="text-[10px] font-black uppercase text-brand-primary hover:underline"
-                >
-                  {authMode === 'login' ? '¿No tienes cuenta? Registrate aquí' : '¿Ya tienes cuenta? Inicia sesión'}
-                </button>
-              </p>
+              <div className="space-y-4">
+                <p className="text-center">
+                  <button 
+                    type="button"
+                    onClick={() => setAuthMode(authMode === 'login' ? 'register' : 'login')}
+                    className="text-[10px] font-black uppercase text-brand-primary hover:underline"
+                  >
+                    {authMode === 'login' ? '¿No tienes cuenta? Registrate aquí' : '¿Ya tienes cuenta? Inicia sesión'}
+                  </button>
+                </p>
+                {authMode === 'login' && (
+                  <p className="text-center">
+                    <button 
+                      type="button"
+                      onClick={handleResetPassword}
+                      className="text-[9px] font-bold uppercase text-brand-text/40 hover:text-brand-primary transition-colors"
+                    >
+                      ¿Olvidaste tu contraseña? Recuperar aquí
+                    </button>
+                  </p>
+                )}
+              </div>
             </form>
 
             <div className="relative py-2">
