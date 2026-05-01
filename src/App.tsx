@@ -965,20 +965,40 @@ export default function App() {
     if (!user || !currentLoan) return;
     setFormError(null);
     setIsSubmitting(true);
+    
+    // Validar monto para evitar errores de base de datos
+    const parsedRemaining = parseFloat(String(editForm.remaining).replace(',', '.'));
+    if (isNaN(parsedRemaining)) {
+      setFormError("El saldo pendiente debe ser un número válido.");
+      setIsSubmitting(false);
+      return;
+    }
+
     try {
-      await updateDoc(doc(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'loans', currentLoan.id), {
+      const loanRef = doc(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'loans', currentLoan.id);
+      
+      // Recalcular progreso si cambia el saldo
+      const debt = currentLoan.debt || 1; // Evitar división por cero
+      const newProgress = Math.round(((debt - parsedRemaining) / debt) * 100);
+
+      await updateDoc(loanRef, {
         client: editForm.client.trim(),
         phone: editForm.phone.trim(),
-        idNumber: editForm.idNumber.trim(),
-        address: editForm.address.trim(),
-        workplace: editForm.workplace.trim(),
+        idNumber: editForm.idNumber ? editForm.idNumber.trim() : '',
+        address: editForm.address ? editForm.address.trim() : '',
+        workplace: editForm.workplace ? editForm.workplace.trim() : '',
         status: editForm.status,
-        remaining: parseFloat(editForm.remaining) || 0
+        remaining: parsedRemaining,
+        progress: Math.max(0, Math.min(100, newProgress))
       });
+
       setShowEditModal(false);
+      toast.success("Información del cliente actualizada.");
       setSystemMessage("✅ Datos actualizados correctamente.");
-    } catch (err) {
-      setFormError("Error al actualizar datos.");
+    } catch (err: any) {
+      console.error("Error updating loan:", err);
+      setFormError(`Error al actualizar: ${err.message || 'Intente de nuevo'}`);
+      toast.error("No se pudo actualizar la información.");
     } finally {
       setIsSubmitting(false);
     }
@@ -1364,57 +1384,68 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="flex gap-2 pt-5 border-t border-brand-border">
+                <div className="flex flex-wrap gap-2 pt-5 border-t border-brand-border">
                   <button 
                     onClick={() => { setCurrentLoan(l); setPaymentAmount(''); setShowPaymentModal(true); }}
-                    className="flex-1 bg-brand-primary text-white py-3 rounded-lg font-black text-[10px] uppercase hover:bg-brand-primary/80 transition-all"
+                    className="flex-1 min-w-[120px] bg-brand-primary text-white py-3 rounded-xl font-black text-[10px] uppercase hover:bg-brand-primary/80 transition-all shadow-md active:scale-95"
                   >
                     COBRAR
                   </button>
-                  <button 
-                    onClick={() => { setCurrentLoan(l); setShowScheduleModal(true); }}
-                    className="aspect-square bg-brand-secondary text-brand-text/50 p-3 rounded-lg hover:bg-brand-secondary/80 transition-all border border-brand-border"
-                  >
-                    <ListChecks className="w-5 h-5" />
-                  </button>
-                  <button 
-                    onClick={() => { setCurrentLoan(l); setShowContractModal(true); }}
-                    className="aspect-square bg-brand-secondary text-brand-text/50 p-3 rounded-lg hover:bg-brand-secondary/80 transition-all border border-brand-border"
-                  >
-                    <FileText className="w-5 h-5" />
-                  </button>
-                  <button 
-                    onClick={() => { 
-                      setCurrentLoan(l); 
-                      setEditForm({
-                        client: l.client,
-                        phone: l.phone,
-                        idNumber: l.idNumber || '',
-                        address: l.address || '',
-                        workplace: l.workplace || '',
-                        debt: String(l.debt),
-                        remaining: String(l.remaining),
-                        status: l.status
-                      });
-                      setShowEditModal(true); 
-                    }}
-                    className="aspect-square bg-brand-secondary text-brand-text/50 p-3 rounded-lg hover:bg-brand-secondary/80 transition-all border border-brand-border"
-                  >
-                    <Edit className="w-5 h-5" />
-                  </button>
-                  <button 
-                    onClick={() => { setCurrentLoan(l); setRenewForm({ capital: '', calcMethod: 'interes', interestRate: '', fixedQuota: '', installments: '' }); setShowRenewModal(true); }}
-                    className="aspect-square bg-brand-yellow/10 text-brand-yellow p-3 rounded-lg hover:bg-brand-yellow/20 transition-all border border-brand-yellow/20"
-                    title="Renovar Préstamo"
-                  >
-                    <ArrowUpRight className="w-5 h-5" />
-                  </button>
-                  <button 
-                    onClick={async () => { if(confirm("¿Eliminar registro permanentemente?")) await deleteDoc(doc(db, 'artifacts', APP_DATA_PREFIX, 'users', user?.uid || '', 'loans', l.id)); }}
-                    className="aspect-square bg-brand-red/10 text-brand-red p-3 rounded-lg hover:bg-brand-red/20 transition-all border border-brand-red/20"
-                  >
-                    <Trash2 className="w-5 h-5" />
-                  </button>
+                  <div className="flex gap-2 w-full sm:w-auto">
+                    <button 
+                      onClick={() => { setCurrentLoan(l); setShowScheduleModal(true); }}
+                      className="flex-1 sm:flex-none flex flex-col items-center justify-center gap-1 bg-brand-secondary text-brand-text/50 p-2 md:p-3 rounded-xl hover:bg-brand-secondary/80 transition-all border border-brand-border"
+                      title="Plan de Pagos"
+                    >
+                      <ListChecks className="w-4 h-4 md:w-5 md:h-5" />
+                      <span className="text-[7px] font-black uppercase md:hidden">Plan</span>
+                    </button>
+                    <button 
+                      onClick={() => { setCurrentLoan(l); setShowContractModal(true); }}
+                      className="flex-1 sm:flex-none flex flex-col items-center justify-center gap-1 bg-brand-secondary text-brand-text/50 p-2 md:p-3 rounded-xl hover:bg-brand-secondary/80 transition-all border border-brand-border"
+                      title="Contrato"
+                    >
+                      <FileText className="w-4 h-4 md:w-5 md:h-5" />
+                      <span className="text-[7px] font-black uppercase md:hidden">Doc</span>
+                    </button>
+                    <button 
+                      onClick={() => { 
+                        setCurrentLoan(l); 
+                        setEditForm({
+                          client: l.client,
+                          phone: l.phone,
+                          idNumber: l.idNumber || '',
+                          address: l.address || '',
+                          workplace: l.workplace || '',
+                          debt: String(l.debt),
+                          remaining: String(l.remaining),
+                          status: l.status
+                        });
+                        setShowEditModal(true); 
+                      }}
+                      className="flex-1 sm:flex-none flex flex-col items-center justify-center gap-1 bg-brand-primary/10 text-brand-primary p-2 md:p-3 rounded-xl hover:bg-brand-primary/20 transition-all border border-brand-primary/20"
+                      title="Editar Cliente"
+                    >
+                      <Edit className="w-4 h-4 md:w-5 md:h-5" />
+                      <span className="text-[7px] font-black uppercase md:hidden">Editar</span>
+                    </button>
+                    <button 
+                      onClick={() => { setCurrentLoan(l); setRenewForm({ capital: '', calcMethod: 'interes', interestRate: '', fixedQuota: '', installments: '' }); setShowRenewModal(true); }}
+                      className="flex-1 sm:flex-none flex flex-col items-center justify-center gap-1 bg-brand-yellow/10 text-brand-yellow p-2 md:p-3 rounded-xl hover:bg-brand-yellow/20 transition-all border border-brand-yellow/20"
+                      title="Renovar Préstamo"
+                    >
+                      <ArrowUpRight className="w-4 h-4 md:w-5 md:h-5" />
+                      <span className="text-[7px] font-black uppercase md:hidden">Renov</span>
+                    </button>
+                    <button 
+                      onClick={async () => { if(confirm("¿Eliminar registro permanentemente?")) await deleteDoc(doc(db, 'artifacts', APP_DATA_PREFIX, 'users', user?.uid || '', 'loans', l.id)); }}
+                      className="flex-1 sm:flex-none flex flex-col items-center justify-center gap-1 bg-brand-red/10 text-brand-red p-2 md:p-3 rounded-xl hover:bg-brand-red/20 transition-all border border-brand-red/20"
+                      title="Eliminar"
+                    >
+                      <Trash2 className="w-4 h-4 md:w-5 md:h-5" />
+                      <span className="text-[7px] font-black uppercase md:hidden">Borrar</span>
+                    </button>
+                  </div>
                 </div>
               </motion.div>
             ))}
