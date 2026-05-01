@@ -72,12 +72,8 @@ service cloud.firestore {
         allow update: if isOwner(userId) 
           && isValidLoan(incoming())
           && (
-            // Identity Integrity
-            incoming().client == existing().client &&
-            incoming().principal == existing().principal &&
-            
-            // Action: Edit Profile
-            (incoming().diff(existing()).affectedKeys().hasOnly(['phone', 'idNumber', 'address', 'workplace', 'status', 'remaining', 'progress', 'interestRate', 'fixedQuota'])) ||
+            // Action: Edit Profile (Allow changing everything except immutable structure like principal)
+            (incoming().diff(existing()).affectedKeys().hasOnly(['client', 'phone', 'idNumber', 'address', 'workplace', 'status', 'remaining', 'progress', 'interestRate', 'fixedQuota'])) ||
             // Action: Process Payment
             (incoming().diff(existing()).affectedKeys().hasOnly(['remaining', 'progress', 'status'])) ||
             // Action: Renew
