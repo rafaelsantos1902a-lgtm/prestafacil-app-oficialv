@@ -885,21 +885,19 @@ export default function App() {
     if (!confirm("⚠️ ¿ESTÁ SEGURO DE REVERSAR ESTE PAGO?\n\n- Se eliminará del historial de caja.\n- Se devolverá el monto al saldo del préstamo.\n- El estado del préstamo volverá a ser 'ACTIVO' si estaba pagado.")) return;
 
     try {
-      const loanId = tr.loanId;
+      let loanId = tr.loanId;
       if (!loanId) {
-        // Fallback: tratar de encontrar el préstamo por nombre de cliente en el concepto
-        // (Para transacciones de migración o anteriores)
-        const clientNameMatch = tr.concept.match(/Abono Cuota - (.*)/);
-        if (clientNameMatch) {
-          const clientName = clientNameMatch[1];
-          const loan = loans.find(l => l.client === clientName && l.status !== 'RENOVADO');
-          if (loan) {
-            await applyReversal(loan.id, tr);
-            return;
-          }
+        // Fallback: tratar de encontrar el préstamo por clientName o por concepto
+        const loan = loans.find(l => l.id === tr.loanId) || 
+                     loans.find(l => l.client === tr.clientName) || 
+                     loans.find(l => tr.concept.includes(l.client) && l.status !== 'RENOVADO');
+        
+        if (loan) {
+          loanId = loan.id;
+        } else {
+          toast.error("No se pudo vincular esta transacción con un préstamo específico.");
+          return;
         }
-        alert("No se pudo vincular esta transacción con un préstamo específico automáticamente.");
-        return;
       }
 
       await applyReversal(loanId, tr);
@@ -934,8 +932,14 @@ export default function App() {
   };
 
   const handlePrintOldReceipt = (tr: Transaction) => {
-    const loan = loans.find(l => l.id === tr.loanId) || loans.find(l => l.client === tr.clientName);
-    if (!loan) return toast.error("No se pudo encontrar el préstamo vinculado.");
+    // Buscar el préstamo por ID, clientName o analizando el concepto
+    const loan = loans.find(l => l.id === tr.loanId) || 
+                 loans.find(l => l.client === tr.clientName) || 
+                 loans.find(l => tr.concept.includes(l.client) && l.status !== 'RENOVADO');
+
+    if (!loan) {
+      return toast.error("No se pudo encontrar el préstamo vinculado a esta transacción.");
+    }
     
     setCurrentLoan(loan);
     setPaymentAmount(String(tr.amount));
