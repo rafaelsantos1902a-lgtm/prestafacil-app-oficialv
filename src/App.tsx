@@ -853,16 +853,24 @@ export default function App() {
     if (monto <= 0) return setFormError("Ingrese un monto válido.");
 
     const resta = Math.max(0, currentLoan.remaining - monto);
+    const progress = Math.round(((currentLoan.debt - resta) / currentLoan.debt) * 100);
     const now = new Date().toISOString();
     
     setIsSubmitting(true);
     try {
-      await updateDoc(doc(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'loans', currentLoan.id), { 
+      const batch = writeBatch(db);
+      
+      // 1. Update Loan
+      const loanRef = doc(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'loans', currentLoan.id);
+      batch.update(loanRef, { 
         remaining: Number(resta.toFixed(2)), 
-        progress: Math.round(((currentLoan.debt - resta) / currentLoan.debt) * 100), 
+        progress: progress, 
         status: resta <= 0.01 ? 'PAGADO' : 'ACTIVO' 
       });
-      await addDoc(collection(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'transactions'), { 
+
+      // 2. Create Transaction
+      const transRef = doc(collection(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'transactions'));
+      batch.set(transRef, { 
         type: 'INYECCION', 
         amount: monto, 
         concept: `Abono Cuota - ${currentLoan.client}`, 
@@ -871,12 +879,17 @@ export default function App() {
         date: now
       });
 
+      await batch.commit();
+
       setReceiptDate(new Date(now).toLocaleDateString());
       sendPaymentAlert(currentLoan.client, monto);
 
       setShowPaymentModal(false); 
       setShowReceiptModal(true);
-    } catch (err) { setFormError("Error al registrar pago."); }
+    } catch (err: any) { 
+      console.error("Payment error:", err);
+      setFormError("Error al registrar pago: " + err.message); 
+    }
     finally { setIsSubmitting(false); }
   };
 
@@ -1471,22 +1484,27 @@ export default function App() {
 
         {/* Receipt Modal */}
         {showReceiptModal && currentLoan && (
-          <div className="fixed inset-0 bg-brand-bg z-[60] flex flex-col items-center justify-center p-4">
-             <div className="w-full max-w-sm" id="receipt-content">
-                <div className="text-center p-10 border border-brand-border mb-6 bg-brand-surface rounded-2xl shadow-xl relative overflow-hidden">
+          <div className="fixed inset-0 bg-brand-bg/95 z-[60] flex flex-col items-center justify-center p-4 backdrop-blur-md overflow-y-auto">
+             <motion.div 
+               initial={{ opacity: 0, scale: 0.9 }}
+               animate={{ opacity: 1, scale: 1 }}
+               className="w-full max-w-sm my-auto" 
+               id="receipt-content"
+             >
+                <div className="text-center p-6 md:p-10 border border-brand-border mb-6 bg-brand-surface rounded-2xl shadow-xl relative overflow-hidden">
                   <div className="absolute top-0 left-0 w-full h-1 bg-brand-primary"></div>
                   <h1 className="text-2xl font-black mb-1 text-brand-text tracking-tighter">PRESTAFÁCIL</h1>
-                  <p className="text-[9px] font-bold text-brand-text-muted tracking-widest uppercase mb-10">COMPROBANTE DE PAGO</p>
+                  <p className="text-[9px] font-bold text-brand-text-muted tracking-widest uppercase mb-6 md:mb-10">COMPROBANTE DE PAGO</p>
                   
-                  <div className="bg-brand-bg rounded-2xl p-6 border border-brand-border mb-8 shadow-inner">
+                  <div className="bg-brand-bg rounded-2xl p-4 md:p-6 border border-brand-border mb-6 md:mb-8 shadow-inner">
                     <p className="text-[9px] font-black text-brand-text-muted uppercase tracking-widest mb-1">Total Recibido</p>
-                    <h2 className="text-5xl font-black text-brand-primary tracking-tighter font-mono">{formatMoney(Number(paymentAmount))}</h2>
+                    <h2 className="text-4xl md:text-5xl font-black text-brand-primary tracking-tighter font-mono">{formatMoney(Number(paymentAmount))}</h2>
                   </div>
 
-                  <div className="space-y-4 text-left">
+                  <div className="space-y-3 md:space-y-4 text-left">
                     <div className="flex justify-between border-b border-brand-border pb-2">
-                      <span className="text-[10px] font-bold text-brand-text-muted uppercase">Cliente</span>
-                      <span className="text-[10px] font-black uppercase text-brand-text">{currentLoan.client}</span>
+                       <span className="text-[10px] font-bold text-brand-text-muted uppercase">Cliente</span>
+                       <span className="text-[10px] font-black uppercase text-brand-text truncate ml-4 text-right flex-1">{currentLoan.client}</span>
                     </div>
                     <div className="flex justify-between border-b border-brand-border pb-2">
                        <span className="text-[10px] font-bold text-brand-text-muted uppercase">Fecha</span>
@@ -1497,19 +1515,19 @@ export default function App() {
                        <span className="text-[10px] font-black uppercase text-brand-text font-mono">{formatMoney(Number(paymentAmount))}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-[10px] font-bold text-brand-text-muted uppercase">Saldo Pendiente</span>
-                      <span className="text-[10px] font-black uppercase text-brand-red font-mono">
-                        {formatMoney(loans.filter(l => l.client === currentLoan.client && l.status === 'ACTIVO').reduce((acc, curr) => acc + curr.remaining, 0))}
-                      </span>
+                       <span className="text-[10px] font-bold text-brand-text-muted uppercase">Saldo Pendiente</span>
+                       <span className="text-[10px] font-black uppercase text-brand-red font-mono">
+                         {formatMoney(currentLoan.remaining)}
+                       </span>
                     </div>
                   </div>
                 </div>
 
-                <div className="flex flex-col gap-3 no-print">
+                <div className="flex flex-col gap-2 md:gap-3 no-print mb-10">
                     <button 
                      onClick={handleDownloadReceiptPDF}
                      disabled={isSubmitting}
-                     className={`w-full bg-brand-primary text-white py-5 rounded-xl font-black text-[10px] uppercase flex items-center justify-center gap-2 shadow-lg shadow-brand-primary/20 transition-all ${isSubmitting ? 'opacity-50' : 'active:scale-95'}`}
+                     className={`w-full bg-brand-primary text-white py-4 md:py-5 rounded-xl font-black text-[10px] uppercase flex items-center justify-center gap-2 shadow-lg shadow-brand-primary/20 transition-all ${isSubmitting ? 'opacity-50' : 'active:scale-95'}`}
                     >
                       {isSubmitting ? 'GENERANDO...' : <><Download className="w-5 h-5" /> DESCARGAR RECIBO PDF</>}
                     </button>
@@ -1518,26 +1536,27 @@ export default function App() {
                        const text = `🧾 *RECIBO DE PAGO - PRESTAFÁCIL*%0A👤 *Cliente:* ${currentLoan.client}%0A💵 *Monto:* ${formatMoney(Number(paymentAmount))}%0A📉 *Saldo:* ${formatMoney(currentLoan.remaining)}%0A📅 *Fecha:* ${receiptDate || new Date().toLocaleDateString()}%0A✅ _Gracias por su cumplimiento._`;
                        window.open(`https://wa.me/1${currentLoan.phone.replace(/\D/g, '')}?text=${text}`, '_blank');
                      }}
-                     className="w-full bg-[#25D366] text-white py-4 rounded-xl font-black text-[10px] uppercase flex items-center justify-center gap-2 shadow-lg shadow-[#25D366]/20 transition-all active:scale-95"
+                     className="w-full bg-[#25D366] text-white py-3 md:py-4 rounded-xl font-black text-[10px] uppercase flex items-center justify-center gap-2 shadow-lg shadow-[#25D366]/20 transition-all active:scale-95"
                     >
-                      <MessageCircle className="w-4 h-4" /> COMPARTIR WHATSAPP
+                      <MessageCircle className="w-4 h-4" /> WHATSAPP
                     </button>
                    <button 
                     onClick={() => {
                       const nextPay = calculateSchedule(currentLoan).find(s => s.status === 'PENDIENTE');
-                      if (!nextPay) return alert("No hay cuotas pendientes.");
-                      const text = `🔔 *RECORDATORIO DE PAGO - PRESTAFÁCIL*%0A👤 *Hola ${currentLoan.client},*%0A%0A_Le recordamos su próximo compromiso de pago:_%0A%0A📅 *Fecha:* ${nextPay.date}%0A💵 *Monto:* ${formatMoney(nextPay.amount)}%0A📉 *Saldo Total:* ${formatMoney(currentLoan.remaining)}%0A%0A🤝 _Agradecemos su puntualidad._`;
+                      const text = nextPay 
+                        ? `🔔 *RECORDATORIO DE PAGO - PRESTAFÁCIL*%0A👤 *Hola ${currentLoan.client},*%0A%0A_Le recordamos su próximo compromiso de pago:_%0A%0A📅 *Fecha:* ${nextPay.date}%0A💵 *Monto:* ${formatMoney(nextPay.amount)}%0A📉 *Saldo Actual:* ${formatMoney(currentLoan.remaining)}%0A%0A🤝 _Agradecemos su puntualidad._`
+                        : `✅ *PRESTAFÁCIL - ESTADO DE CUENTA*%0A👤 *Hola ${currentLoan.client},*%0A%0A_Su préstamo ha sido completado con éxito._%0A📉 *Saldo Actual:* ${formatMoney(currentLoan.remaining)}`;
                       window.open(`https://wa.me/1${currentLoan.phone.replace(/\D/g, '')}?text=${text}`, '_blank');
                     }}
-                    className="w-full bg-brand-secondary text-brand-text/70 py-4 rounded-xl font-black text-[10px] uppercase flex items-center justify-center gap-2 border border-brand-border transition-all active:scale-95"
+                    className="w-full bg-brand-secondary text-brand-text/70 py-3 md:py-4 rounded-xl font-black text-[10px] uppercase flex items-center justify-center gap-2 border border-brand-border transition-all active:scale-95"
                    >
-                     <Calendar className="w-4 h-4" /> COMPARTIR PRÓXIMO PAGO
+                     <Calendar className="w-4 h-4" /> COMPARTIR SALDO/PRÓXIMO PAGO
                    </button>
-                   <button onClick={closeAllModals} className="w-full bg-brand-secondary text-brand-text/70 py-5 rounded-xl font-black text-[10px] uppercase border border-brand-border transition-all active:scale-95">
+                   <button onClick={closeAllModals} className="w-full bg-brand-secondary text-brand-text/70 py-4 md:py-5 rounded-xl font-black text-[10px] uppercase border border-brand-border transition-all active:scale-95">
                      CERRAR
                    </button>
                 </div>
-             </div>
+             </motion.div>
           </div>
         )}
 
@@ -1796,55 +1815,56 @@ export default function App() {
 
         {/* Modal Plan de Pagos */}
         {showScheduleModal && currentLoan && (
-          <div className="fixed inset-0 bg-brand-bg/95 z-50 flex items-center justify-center p-4 backdrop-blur-md">
+          <div className="fixed inset-0 bg-brand-bg/95 z-50 flex items-center justify-center p-0 md:p-4 backdrop-blur-md">
             <motion.div 
-              initial={{ opacity: 0, scale: 0.98 }}
-              animate={{ opacity: 1, scale: 1 }}
-              className="bg-brand-surface rounded-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh] border border-brand-border shadow-2xl"
+              initial={{ opacity: 0, scale: 0.98, y: 50 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              className="bg-brand-surface w-full h-full md:h-auto md:max-w-2xl md:rounded-2xl overflow-hidden flex flex-col max-h-[100vh] md:max-h-[90vh] border border-brand-border shadow-2xl"
             >
-              <div className="bg-brand-surface p-8 border-b border-brand-border relative">
-                <button onClick={closeAllModals} className="absolute top-8 right-8 text-brand-text/20 hover:text-brand-text">
+              <div className="bg-brand-surface p-6 md:p-8 border-b border-brand-border relative sticky top-0 z-10">
+                <button onClick={closeAllModals} className="absolute top-6 right-6 text-brand-text/20 hover:text-brand-text">
                   <X className="w-6 h-6" />
                 </button>
-                <div className="flex items-center justify-between mb-6 pr-12">
+                <div className="flex flex-col md:flex-row md:items-center justify-between mb-6 gap-4 pr-10">
                   <div className="flex items-center gap-4">
-                    <div className="bg-brand-bg border border-brand-border p-3 rounded-xl shadow-inner">
+                    <div className="bg-brand-bg border border-brand-border p-3 rounded-xl shadow-inner shrink-0">
                       <ListChecks className="w-6 h-6 text-brand-primary" />
                     </div>
-                    <h2 className="text-2xl font-black tracking-tight uppercase truncate max-w-[300px] text-brand-text">
+                    <h2 className="text-xl md:text-2xl font-black tracking-tight uppercase truncate text-brand-text">
                       {currentLoan.client}
                     </h2>
                   </div>
-                  <div className="flex bg-brand-bg p-1 rounded-xl border border-brand-border">
+                  <div className="flex bg-brand-bg p-1 rounded-xl border border-brand-border w-full md:w-auto">
                     <button 
                       onClick={() => setActiveScheduleTab('plan')}
-                      className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all ${activeScheduleTab === 'plan' ? 'bg-brand-primary text-white shadow-md' : 'text-brand-text/40'}`}
+                      className={`flex-1 md:flex-none px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all ${activeScheduleTab === 'plan' ? 'bg-brand-primary text-white shadow-md' : 'text-brand-text/40'}`}
                     >
                       Plan
                     </button>
                     <button 
                       onClick={() => setActiveScheduleTab('pagos')}
-                      className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all ${activeScheduleTab === 'pagos' ? 'bg-brand-primary text-white shadow-md' : 'text-brand-text/40'}`}
+                      className={`flex-1 md:flex-none px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all ${activeScheduleTab === 'pagos' ? 'bg-brand-primary text-white shadow-md' : 'text-brand-text/40'}`}
                     >
                       Pagos
                     </button>
                   </div>
                 </div>
-                <div className="grid grid-cols-2 gap-12 pt-4 border-t border-brand-border/10">
+                <div className="grid grid-cols-2 gap-4 md:gap-12 pt-4 border-t border-brand-border/10">
                   <div>
                     <p className="text-[9px] font-black text-brand-text/30 uppercase tracking-widest mb-1">Inició Préstamo</p>
-                    <p className="font-bold text-brand-text/60">{currentLoan.date}</p>
+                    <p className="font-bold text-brand-text/60 text-[10px] md:text-sm">{currentLoan.date}</p>
                   </div>
                   <div className="text-right">
                     <p className="text-[9px] font-black text-brand-text/30 uppercase tracking-widest mb-1">Saldo por Cobrar</p>
-                    <p className="text-xl font-black text-brand-primary font-mono">{formatMoney(currentLoan.remaining)}</p>
+                    <p className="text-lg md:text-xl font-black text-brand-primary font-mono">{formatMoney(currentLoan.remaining)}</p>
                   </div>
                 </div>
               </div>
 
+              <div className="flex-1 overflow-y-auto">
                   {activeScheduleTab === 'plan' ? (
-                    <>
-                      <div className="flex-1 overflow-y-auto p-10 bg-white text-slate-900 selection:bg-brand-primary" id="schedule-content">
+                    <div className="flex flex-col divide-y divide-brand-border">
+                      <div className="hidden md:block p-10 bg-white text-slate-900 selection:bg-brand-primary border-b border-brand-border" id="schedule-content">
                         <div className="text-center mb-8 border-b-2 border-brand-primary pb-4">
                           <h2 className="text-4xl font-black text-brand-primary uppercase tracking-tighter">PRESTAFÁCIL</h2>
                           <p className="text-[10px] font-black tracking-[0.3em] text-slate-400 uppercase mt-2">Plan de Pagos Detallado</p>
@@ -1883,30 +1903,30 @@ export default function App() {
                         </table>
                       </div>
 
-                      <div className="flex-1 overflow-y-auto px-8 py-6 space-y-3 bg-brand-bg shadow-inner">
+                      <div className="p-4 md:px-8 md:py-6 space-y-3 bg-brand-bg shadow-inner">
                         {calculateSchedule(currentLoan).map((s) => (
                           <div key={s.num} className={`bg-brand-surface p-4 rounded-xl border border-brand-border flex justify-between items-center ${s.status === 'PAGADO' ? 'opacity-30' : 'shadow-sm'}`}>
-                            <div className="flex items-center gap-4">
-                              <div className="w-8 h-8 rounded bg-brand-bg border border-brand-border flex items-center justify-center font-bold text-[10px] text-brand-text/40">
+                            <div className="flex items-center gap-3 md:gap-4">
+                              <div className="w-8 h-8 rounded bg-brand-bg border border-brand-border flex items-center justify-center font-bold text-[10px] text-brand-text/40 shrink-0">
                                 {s.num}
                               </div>
                               <div>
-                                <p className="font-black text-sm text-brand-text font-mono">
+                                <p className="font-black text-xs md:text-sm text-brand-text font-mono">
                                   {formatMoney(s.amount)}
-                                  {s.mora > 0 && <span className="text-[9px] text-brand-red ml-2 uppercase">Incluye Mora {formatMoney(s.mora)}</span>}
+                                  {s.mora > 0 && <span className="text-[8px] md:text-[9px] text-brand-red ml-1 md:ml-2 uppercase">MORA Incl.</span>}
                                 </p>
-                                <p className="text-[9px] font-bold text-brand-text/30 uppercase">{s.date}</p>
+                                <p className="text-[8px] md:text-[9px] font-bold text-brand-text/30 uppercase">{s.date}</p>
                               </div>
                             </div>
-                            <div className={`text-[9px] font-black uppercase px-3 py-1.5 rounded border ${s.status === 'PAGADO' ? 'bg-brand-green/10 text-brand-green border-brand-green/20' : s.status === 'MORA' ? 'bg-brand-red/10 text-brand-red border-brand-red/20' : 'bg-brand-primary/10 text-brand-primary border-brand-primary/20'}`}>
+                            <div className={`text-[8px] md:text-[9px] font-black uppercase px-2 md:px-3 py-1 rounded border ${s.status === 'PAGADO' ? 'bg-brand-green/10 text-brand-green border-brand-green/20' : s.status === 'MORA' ? 'bg-brand-red/10 text-brand-red border-brand-red/20' : 'bg-brand-primary/10 text-brand-primary border-brand-primary/20'}`}>
                               {s.status === 'PAGADO' ? <Check className="w-3 h-3" /> : s.status}
                             </div>
                           </div>
                         ))}
                       </div>
-                    </>
+                    </div>
                   ) : (
-                    <div className="flex-1 overflow-y-auto px-8 py-6 bg-brand-bg space-y-4">
+                    <div className="px-4 md:px-8 py-6 bg-brand-bg space-y-4">
                       {transactions
                         .filter(t => t.loanId === currentLoan.id || (t.concept.includes('Abono') && t.concept.includes(currentLoan.client)))
                         .length === 0 ? (
@@ -1915,27 +1935,27 @@ export default function App() {
                           transactions
                             .filter(t => t.loanId === currentLoan.id || (t.concept.includes('Abono') && t.concept.includes(currentLoan.client)))
                             .map(t => (
-                              <div key={t.id} className="bg-brand-surface p-6 rounded-2xl border border-brand-border flex items-center justify-between group">
-                                <div className="flex items-center gap-4">
-                                  <div className="bg-brand-green/10 p-3 rounded-xl border border-brand-green/20 text-brand-green">
-                                    <ArrowDownRight className="w-5 h-5" />
+                              <div key={t.id} className="bg-brand-surface p-4 md:p-6 rounded-2xl border border-brand-border flex items-center justify-between group">
+                                <div className="flex items-center gap-3 md:gap-4">
+                                  <div className="bg-brand-green/10 p-2 md:p-3 rounded-xl border border-brand-green/20 text-brand-green h-fit">
+                                    <ArrowDownRight className="w-4 h-4 md:w-5 md:h-5" />
                                   </div>
                                   <div>
-                                    <p className="text-lg font-black text-brand-text font-mono tracking-tighter">{formatMoney(t.amount)}</p>
-                                    <p className="text-[9px] font-black text-brand-text/30 uppercase">{new Date(t.date).toLocaleString('es-DO')}</p>
+                                    <p className="text-base md:text-lg font-black text-brand-text font-mono tracking-tighter">{formatMoney(t.amount)}</p>
+                                    <p className="text-[8px] md:text-[9px] font-black text-brand-text/30 uppercase">{new Date(t.date).toLocaleString('es-DO')}</p>
                                   </div>
                                 </div>
                                 <div className="flex gap-2">
                                   <button 
                                     onClick={() => handlePrintOldReceipt(t)}
-                                    className="p-3 bg-brand-secondary text-brand-text/50 rounded-lg hover:text-brand-primary transition-all border border-brand-border"
+                                    className="p-2 md:p-3 bg-brand-secondary text-brand-text/50 rounded-lg hover:text-brand-primary transition-all border border-brand-border"
                                     title="Volver a imprimir recibo"
                                   >
                                     <Printer className="w-4 h-4" />
                                   </button>
                                   <button 
                                     onClick={() => handleReversePayment(t)}
-                                    className="p-3 bg-brand-red/5 text-brand-red/30 rounded-lg hover:text-brand-red hover:bg-brand-red/10 transition-all border border-brand-red/10"
+                                    className="p-2 md:p-3 bg-brand-red/5 text-brand-red/30 rounded-lg hover:text-brand-red hover:bg-brand-red/10 transition-all border border-brand-red/10"
                                     title="Reversar pago"
                                   >
                                     <Trash className="w-4 h-4" />
@@ -1947,18 +1967,19 @@ export default function App() {
                       }
                     </div>
                   )}
+              </div>
 
-              <div className="p-8 border-t border-brand-border flex gap-4 bg-brand-surface">
+              <div className="p-4 md:p-8 border-t border-brand-border flex flex-col md:flex-row gap-3 bg-brand-surface sticky bottom-0">
                 <button 
                   onClick={handleDownloadSchedulePDF}
                   disabled={isSubmitting}
-                  className="flex-1 bg-brand-primary text-white py-4 rounded-xl font-black uppercase text-[10px] tracking-widest flex items-center justify-center gap-2 shadow-lg shadow-brand-primary/20 hover:bg-brand-primary/90 transition-all font-mono"
+                  className="flex-1 bg-brand-primary text-white py-4 rounded-xl font-black uppercase text-[10px] tracking-widest flex items-center justify-center gap-2 shadow-lg shadow-brand-primary/20 hover:bg-brand-primary/90 transition-all active:scale-95"
                 >
-                  <Download className="w-4 h-4" /> DESCARGAR PLAN PARA WHATSAPP
+                  <Download className="w-4 h-4" /> PLAN COMPLETO PDF
                 </button>
                 <button 
                   onClick={closeAllModals}
-                  className="flex-1 bg-brand-primary text-white py-4 rounded-xl font-black uppercase text-[10px] tracking-widest shadow-lg shadow-brand-primary/20 hover:bg-brand-primary/80 transition-all"
+                  className="flex-1 bg-brand-secondary text-brand-text/50 py-4 rounded-xl font-black uppercase text-[10px] tracking-widest border border-brand-border hover:bg-brand-secondary/80 transition-all active:scale-95"
                 >
                   CERRAR
                 </button>
@@ -1969,26 +1990,26 @@ export default function App() {
 
         {/* Modal Editar */}
         {showEditModal && currentLoan && (
-          <div className="fixed inset-0 bg-brand-bg/95 z-50 flex items-center justify-center p-4 backdrop-blur-md">
+          <div className="fixed inset-0 bg-brand-bg/95 z-50 flex items-center justify-center p-0 md:p-4 backdrop-blur-md overflow-y-auto">
             <motion.div 
-              initial={{ opacity: 0, scale: 0.98 }}
-              animate={{ opacity: 1, scale: 1 }}
-              className="bg-brand-surface rounded-2xl w-full max-w-xl shadow-2xl p-10 relative border border-brand-border"
+              initial={{ opacity: 0, scale: 0.98, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              className="bg-brand-surface w-full min-h-screen md:min-h-0 md:max-w-xl md:rounded-2xl shadow-2xl p-6 md:p-10 relative border border-brand-border"
             >
-              <button onClick={closeAllModals} className="absolute top-8 right-8 text-brand-text/20 hover:text-brand-text">
+              <button onClick={closeAllModals} className="absolute top-6 right-6 text-brand-text/20 hover:text-brand-text">
                 <X className="w-6 h-6" />
               </button>
               
-              <h2 className="text-2xl font-black text-brand-text mb-8 tracking-tight uppercase">Editar Préstamo</h2>
+              <h2 className="text-xl md:text-2xl font-black text-brand-text mb-8 tracking-tight uppercase">Editar Información</h2>
               
-              <form onSubmit={handleSaveEdit} className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <form onSubmit={handleSaveEdit} className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6 pb-10 md:pb-0">
                 <div className="md:col-span-2">
-                  <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2">Cliente</label>
+                  <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2">Nombre del Cliente</label>
                   <input 
                     required 
                     value={editForm.client}
                     onChange={(e) => setEditForm({...editForm, client: e.target.value})}
-                    className="w-full border border-brand-border p-4 rounded-xl font-bold bg-brand-bg text-brand-text outline-none"
+                    className="w-full border border-brand-border p-4 rounded-xl font-bold bg-brand-bg text-brand-text focus:border-brand-primary/50 transition-all outline-none"
                   />
                 </div>
                 <div>
@@ -1997,7 +2018,7 @@ export default function App() {
                     required 
                     value={editForm.phone}
                     onChange={(e) => setEditForm({...editForm, phone: e.target.value})}
-                    className="w-full border border-brand-border p-4 rounded-xl font-bold bg-brand-bg text-brand-text outline-none"
+                    className="w-full border border-brand-border p-4 rounded-xl font-bold bg-brand-bg text-brand-text focus:border-brand-primary/50 transition-all outline-none"
                   />
                 </div>
                 <div>
@@ -2005,32 +2026,33 @@ export default function App() {
                   <input 
                     value={editForm.idNumber}
                     onChange={(e) => setEditForm({...editForm, idNumber: e.target.value})}
-                    className="w-full border border-brand-border p-4 rounded-xl font-bold bg-brand-bg text-brand-text outline-none"
+                    className="w-full border border-brand-border p-4 rounded-xl font-bold bg-brand-bg text-brand-text focus:border-brand-primary/50 transition-all outline-none"
                   />
                 </div>
                 <div className="md:col-span-2">
-                  <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2">Dirección</label>
+                  <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2">Dirección Residencial</label>
                   <input 
                     value={editForm.address}
                     onChange={(e) => setEditForm({...editForm, address: e.target.value})}
-                    className="w-full border border-brand-border p-4 rounded-xl font-bold bg-brand-bg text-brand-text outline-none"
+                    className="w-full border border-brand-border p-4 rounded-xl font-bold bg-brand-bg text-brand-text focus:border-brand-primary/50 transition-all outline-none"
                   />
                 </div>
                 <div className="md:col-span-2">
-                  <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2">Trabajo</label>
+                  <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2">Lugar de Trabajo</label>
                   <input 
                     value={editForm.workplace}
                     onChange={(e) => setEditForm({...editForm, workplace: e.target.value})}
-                    className="w-full border border-brand-border p-4 rounded-xl font-bold bg-brand-bg text-brand-text outline-none"
+                    className="w-full border border-brand-border p-4 rounded-xl font-bold bg-brand-bg text-brand-text focus:border-brand-primary/50 transition-all outline-none"
                   />
                 </div>
                 <div>
                   <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2">Saldo Actual</label>
                   <input 
                     type="number"
+                    step="any"
                     value={editForm.remaining}
                     onChange={(e) => setEditForm({...editForm, remaining: e.target.value})}
-                    className="w-full border border-brand-border p-4 rounded-xl font-bold bg-brand-bg text-brand-text outline-none"
+                    className="w-full border border-brand-border p-4 rounded-xl font-bold bg-brand-bg text-brand-text focus:border-brand-primary/50 transition-all outline-none font-mono"
                   />
                 </div>
                 <div>
@@ -2038,21 +2060,24 @@ export default function App() {
                   <select 
                     value={editForm.status}
                     onChange={(e) => setEditForm({...editForm, status: e.target.value as any})}
-                    className="w-full border border-brand-border p-4 rounded-xl font-black text-[10px] uppercase bg-brand-bg text-brand-text outline-none"
+                    className="w-full border border-brand-border p-4 rounded-xl font-black text-[10px] uppercase bg-brand-bg text-brand-text focus:border-brand-primary/50 transition-all outline-none"
                   >
                     <option value="ACTIVO">ACTIVO</option>
                     <option value="PAGADO">PAGADO</option>
+                    <option value="RENOVADO">RENOVADO</option>
                   </select>
                 </div>
 
-                <button 
-                  type="submit"
-                  disabled={isSubmitting}
-                  className={`md:col-span-2 bg-brand-primary text-white py-5 rounded-xl font-black uppercase text-[10px] tracking-widest shadow-xl shadow-brand-primary/20 transition-all ${isSubmitting ? 'opacity-50' : 'hover:bg-brand-primary/80 active:scale-[0.98]'}`}
-                >
-                  {isSubmitting ? 'GUARDANDO...' : 'GUARDAR CAMBIOS'}
-                </button>
-                {formError && <p className="md:col-span-2 text-brand-red text-[10px] font-black uppercase text-center">{formError}</p>}
+                <div className="md:col-span-2 pt-4">
+                  <button 
+                    type="submit"
+                    disabled={isSubmitting}
+                    className={`w-full bg-brand-primary text-white py-5 rounded-xl font-black uppercase text-[10px] tracking-widest shadow-xl shadow-brand-primary/20 transition-all ${isSubmitting ? 'opacity-50' : 'hover:bg-brand-primary/80 active:scale-[0.98]'}`}
+                  >
+                    {isSubmitting ? 'GUARDANDO...' : 'GUARDAR CAMBIOS'}
+                  </button>
+                  {formError && <p className="mt-4 text-brand-red text-[10px] font-black uppercase text-center">{formError}</p>}
+                </div>
               </form>
             </motion.div>
           </div>
@@ -2279,21 +2304,21 @@ export default function App() {
 
         {/* Modal Gestión de Caja */}
         {showCashModal && (
-          <div className="fixed inset-0 bg-brand-bg/95 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
+          <div className="fixed inset-0 bg-brand-bg/95 z-50 flex items-center justify-center p-0 md:p-4 backdrop-blur-md">
             <motion.div 
               initial={{ opacity: 0, scale: 0.98, y: 10 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
-              className="bg-brand-surface rounded-2xl w-full max-w-xl shadow-2xl overflow-hidden flex flex-col max-h-[85vh] border border-brand-border"
+              className="bg-brand-surface w-full h-full md:h-auto md:max-w-xl md:rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[100vh] md:max-h-[85vh] border border-brand-border"
             >
-              <div className="bg-brand-surface p-8 border-b border-brand-border flex justify-between items-center bg-gradient-to-r from-brand-surface to-brand-bg">
-                <h3 className="font-black text-lg uppercase tracking-tight text-brand-text">CONTROL DE CAJA</h3>
-                <button onClick={closeAllModals} className="text-brand-text/20 hover:text-brand-text"><X /></button>
+              <div className="bg-brand-surface p-6 md:p-8 border-b border-brand-border flex justify-between items-center bg-gradient-to-r from-brand-surface to-brand-bg sticky top-0 z-10">
+                <h3 className="font-black text-sm md:text-lg uppercase tracking-tight text-brand-text">CONTROL DE CAJA</h3>
+                <button onClick={closeAllModals} className="text-brand-text/20 hover:text-brand-text p-2"><X /></button>
               </div>
               
-              <div className="p-8 overflow-y-auto space-y-8 bg-brand-bg/50">
+              <div className="p-4 md:p-8 overflow-y-auto flex-1 space-y-6 md:space-y-8 bg-brand-bg/50">
                 {/* Formulario rápido */}
-                <div className="bg-brand-surface p-6 rounded-2xl border border-brand-border shadow-sm">
-                  <div className="grid grid-cols-2 gap-4 mb-4">
+                <div className="bg-brand-surface p-4 md:p-6 rounded-2xl border border-brand-border shadow-sm">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 md:gap-4 mb-4">
                     <select 
                       value={cashForm.type}
                       onChange={(e) => setCashForm({...cashForm, type: e.target.value as any})}
@@ -2314,22 +2339,31 @@ export default function App() {
                       placeholder="Concepto del movimiento..."
                       value={cashForm.concept}
                       onChange={(e) => setCashForm({...cashForm, concept: e.target.value})}
-                      className="col-span-2 bg-brand-bg border border-brand-border rounded-xl p-4 font-bold text-xs text-brand-text outline-none focus:border-brand-primary/50"
+                      className="md:col-span-2 bg-brand-bg border border-brand-border rounded-xl p-4 font-bold text-xs text-brand-text outline-none focus:border-brand-primary/50"
                     />
                   </div>
                   <button 
                     onClick={async () => {
                       if (!user || !cashForm.amount || !cashForm.concept) return;
                       const am = parseFloat(cashForm.amount);
-                      if (cashForm.type === 'RETIRO' && am > totals.caja) return alert("Fondos insuficientes.");
-                      await addDoc(collection(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'transactions'), {
-                        ...cashForm, amount: am, date: new Date().toISOString()
-                      });
-                      setCashForm({ type: 'INYECCION', amount: '', concept: '' });
+                      if (cashForm.type === 'RETIRO' && am > totals.caja) return toast.error("Fondos insuficientes.");
+                      setIsSubmitting(true);
+                      try {
+                        await addDoc(collection(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'transactions'), {
+                          ...cashForm, amount: am, date: new Date().toISOString()
+                        });
+                        setCashForm({ type: 'INYECCION', amount: '', concept: '' });
+                        toast.success("Movimiento registrado");
+                      } catch (e: any) { 
+                        toast.error("Error al registrar movimiento"); 
+                      } finally {
+                        setIsSubmitting(false);
+                      }
                     }}
+                    disabled={isSubmitting}
                     className="w-full bg-brand-primary text-white py-4 rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-brand-primary/20 hover:bg-brand-primary/80 transition-all active:scale-95"
                   >
-                    REGISTRAR MOVIMIENTO
+                    {isSubmitting ? 'REGISTRANDO...' : 'REGISTRAR MOVIMIENTO'}
                   </button>
                 </div>
 
@@ -2337,18 +2371,18 @@ export default function App() {
                 <div className="space-y-4">
                   <p className="text-[9px] font-black text-brand-text/30 uppercase tracking-widest px-2">Historial Reciente</p>
                   <div className="divide-y divide-brand-border/50">
-                    {transactions.map(t => (
-                      <div key={t.id} className="py-5 flex justify-between items-center group">
-                        <div className="flex gap-4 items-center">
-                          <div className={`p-3 rounded-xl border ${t.type === 'RETIRO' ? 'bg-brand-red/10 text-brand-red border-brand-red/20' : 'bg-brand-green/10 text-brand-green border-brand-green/20'}`}>
+                    {transactions.slice(0, 50).map(t => (
+                      <div key={t.id} className="py-4 md:py-5 flex justify-between items-center group">
+                        <div className="flex gap-3 md:gap-4 items-center overflow-hidden">
+                          <div className={`p-2 md:p-3 rounded-lg md:rounded-xl border shrink-0 ${t.type === 'RETIRO' ? 'bg-brand-red/10 text-brand-red border-brand-red/20' : 'bg-brand-green/10 text-brand-green border-brand-green/20'}`}>
                             {t.type === 'RETIRO' ? <ArrowUpRight className="w-4 h-4" /> : <ArrowDownRight className="w-4 h-4" />}
                           </div>
-                          <div>
-                            <p className="text-xs font-black uppercase text-brand-text mb-1 tracking-tight">{t.concept}</p>
-                            <p className="text-[9px] font-bold text-brand-text/30 uppercase">{new Date(t.date).toLocaleDateString()}</p>
+                          <div className="truncate">
+                            <p className="text-[10px] md:text-xs font-black uppercase text-brand-text mb-1 tracking-tight truncate">{t.concept}</p>
+                            <p className="text-[8px] md:text-[9px] font-bold text-brand-text/30 uppercase">{new Date(t.date).toLocaleDateString()}</p>
                           </div>
                         </div>
-                        <p className={`font-black text-lg font-mono tracking-tighter ${t.type === 'RETIRO' ? 'text-brand-red' : 'text-brand-green'}`}>
+                        <p className={`font-black text-sm md:text-lg font-mono tracking-tighter shrink-0 ml-4 ${t.type === 'RETIRO' ? 'text-brand-red' : 'text-brand-green'}`}>
                           {t.type === 'RETIRO' ? '-' : '+'}{formatMoney(t.amount)}
                         </p>
                       </div>
