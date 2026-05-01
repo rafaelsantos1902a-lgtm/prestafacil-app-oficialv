@@ -62,6 +62,8 @@ interface Transaction {
   amount: number;
   concept: string;
   date: string;
+  loanId?: string;
+  clientName?: string;
 }
 
 export default function App() {
@@ -101,6 +103,8 @@ export default function App() {
   
   // Formularios
   const [migrationText, setMigrationText] = useState('');
+  const [receiptDate, setReceiptDate] = useState('');
+  const [activeScheduleTab, setActiveScheduleTab] = useState<'plan' | 'pagos'>('plan');
   const [paymentAmount, setPaymentAmount] = useState('');
   const [newLoanForm, setNewLoanForm] = useState({
     client: '', phone: '', idNumber: '', address: '', workplace: '', calcMethod: 'interes', capital: '', interestRate: '', fixedQuota: '', installments: '', freqDays: '15'
@@ -418,7 +422,7 @@ export default function App() {
       
       y += 8;
       doc.text('FECHA:', 10, y);
-      doc.text(new Date().toLocaleDateString(), 70, y, { align: 'right' });
+      doc.text(receiptDate || new Date().toLocaleDateString(), 70, y, { align: 'right' });
 
       y += 12;
       doc.text('PAGO RECIBIDO:', 10, y);
@@ -849,6 +853,7 @@ export default function App() {
     if (monto <= 0) return setFormError("Ingrese un monto válido.");
 
     const resta = Math.max(0, currentLoan.remaining - monto);
+    const now = new Date().toISOString();
     
     setIsSubmitting(true);
     try {
@@ -861,15 +866,81 @@ export default function App() {
         type: 'INYECCION', 
         amount: monto, 
         concept: `Abono Cuota - ${currentLoan.client}`, 
-        date: new Date().toISOString() 
+        loanId: currentLoan.id,
+        clientName: currentLoan.client,
+        date: now
       });
 
+      setReceiptDate(new Date(now).toLocaleDateString());
       sendPaymentAlert(currentLoan.client, monto);
 
       setShowPaymentModal(false); 
       setShowReceiptModal(true);
     } catch (err) { setFormError("Error al registrar pago."); }
     finally { setIsSubmitting(false); }
+  };
+
+  const handleReversePayment = async (tr: Transaction) => {
+    if (!user) return;
+    if (!confirm("⚠️ ¿ESTÁ SEGURO DE REVERSAR ESTE PAGO?\n\n- Se eliminará del historial de caja.\n- Se devolverá el monto al saldo del préstamo.\n- El estado del préstamo volverá a ser 'ACTIVO' si estaba pagado.")) return;
+
+    try {
+      const loanId = tr.loanId;
+      if (!loanId) {
+        // Fallback: tratar de encontrar el préstamo por nombre de cliente en el concepto
+        // (Para transacciones de migración o anteriores)
+        const clientNameMatch = tr.concept.match(/Abono Cuota - (.*)/);
+        if (clientNameMatch) {
+          const clientName = clientNameMatch[1];
+          const loan = loans.find(l => l.client === clientName && l.status !== 'RENOVADO');
+          if (loan) {
+            await applyReversal(loan.id, tr);
+            return;
+          }
+        }
+        alert("No se pudo vincular esta transacción con un préstamo específico automáticamente.");
+        return;
+      }
+
+      await applyReversal(loanId, tr);
+    } catch (error: any) {
+      toast.error("Error al reversar: " + error.message);
+    }
+  };
+
+  const applyReversal = async (loanId: string, tr: Transaction) => {
+    if (!user) return;
+    const loanRef = doc(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'loans', loanId);
+    const loanDoc = loans.find(l => l.id === loanId);
+    
+    if (!loanDoc) throw new Error("Préstamo no encontrado.");
+
+    const batch = writeBatch(db);
+    
+    // 1. Delete transaction
+    batch.delete(doc(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'transactions', tr.id));
+
+    // 2. Update loan
+    const newRemaining = Number((loanDoc.remaining + tr.amount).toFixed(2));
+    batch.update(loanRef, {
+      remaining: newRemaining,
+      progress: Math.round(((loanDoc.debt - newRemaining) / loanDoc.debt) * 100),
+      status: 'ACTIVO'
+    });
+
+    await batch.commit();
+    toast.success("Pago reversado correctamente.");
+    setSystemMessage(`✅ Pago de ${formatMoney(tr.amount)} reversado.`);
+  };
+
+  const handlePrintOldReceipt = (tr: Transaction) => {
+    const loan = loans.find(l => l.id === tr.loanId) || loans.find(l => l.client === tr.clientName);
+    if (!loan) return toast.error("No se pudo encontrar el préstamo vinculado.");
+    
+    setCurrentLoan(loan);
+    setPaymentAmount(String(tr.amount));
+    setReceiptDate(new Date(tr.date).toLocaleDateString());
+    setShowReceiptModal(true);
   };
 
   const handleSaveEdit = async (e: React.FormEvent) => {
@@ -1414,6 +1485,10 @@ export default function App() {
                       <span className="text-[10px] font-black uppercase text-brand-text">{currentLoan.client}</span>
                     </div>
                     <div className="flex justify-between border-b border-brand-border pb-2">
+                       <span className="text-[10px] font-bold text-brand-text-muted uppercase">Fecha</span>
+                       <span className="text-[10px] font-black uppercase text-brand-text">{receiptDate || new Date().toLocaleDateString()}</span>
+                    </div>
+                    <div className="flex justify-between border-b border-brand-border pb-2">
                        <span className="text-[10px] font-bold text-brand-text-muted uppercase">Pago Recibido</span>
                        <span className="text-[10px] font-black uppercase text-brand-text font-mono">{formatMoney(Number(paymentAmount))}</span>
                     </div>
@@ -1436,7 +1511,7 @@ export default function App() {
                     </button>
                     <button 
                      onClick={() => {
-                       const text = `🧾 *RECIBO DE PAGO - PRESTAFÁCIL*%0A👤 *Cliente:* ${currentLoan.client}%0A💵 *Monto:* ${formatMoney(Number(paymentAmount))}%0A📉 *Saldo:* ${formatMoney(currentLoan.remaining)}%0A📅 *Fecha:* ${new Date().toLocaleDateString()}%0A✅ _Gracias por su cumplimiento._`;
+                       const text = `🧾 *RECIBO DE PAGO - PRESTAFÁCIL*%0A👤 *Cliente:* ${currentLoan.client}%0A💵 *Monto:* ${formatMoney(Number(paymentAmount))}%0A📉 *Saldo:* ${formatMoney(currentLoan.remaining)}%0A📅 *Fecha:* ${receiptDate || new Date().toLocaleDateString()}%0A✅ _Gracias por su cumplimiento._`;
                        window.open(`https://wa.me/1${currentLoan.phone.replace(/\D/g, '')}?text=${text}`, '_blank');
                      }}
                      className="w-full bg-[#25D366] text-white py-4 rounded-xl font-black text-[10px] uppercase flex items-center justify-center gap-2 shadow-lg shadow-[#25D366]/20 transition-all active:scale-95"
@@ -1727,9 +1802,29 @@ export default function App() {
                 <button onClick={closeAllModals} className="absolute top-8 right-8 text-brand-text/20 hover:text-brand-text">
                   <X className="w-6 h-6" />
                 </button>
-                <div className="flex items-center gap-4 mb-6">
-                  <div className="bg-brand-bg border border-brand-border p-3 rounded-xl shadow-inner"><ListChecks className="w-6 h-6 text-brand-primary" /></div>
-                  <h2 className="text-2xl font-black tracking-tight uppercase truncate max-w-[400px] text-brand-text">{currentLoan.client}</h2>
+                <div className="flex items-center justify-between mb-6 pr-12">
+                  <div className="flex items-center gap-4">
+                    <div className="bg-brand-bg border border-brand-border p-3 rounded-xl shadow-inner">
+                      <ListChecks className="w-6 h-6 text-brand-primary" />
+                    </div>
+                    <h2 className="text-2xl font-black tracking-tight uppercase truncate max-w-[300px] text-brand-text">
+                      {currentLoan.client}
+                    </h2>
+                  </div>
+                  <div className="flex bg-brand-bg p-1 rounded-xl border border-brand-border">
+                    <button 
+                      onClick={() => setActiveScheduleTab('plan')}
+                      className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all ${activeScheduleTab === 'plan' ? 'bg-brand-primary text-white shadow-md' : 'text-brand-text/40'}`}
+                    >
+                      Plan
+                    </button>
+                    <button 
+                      onClick={() => setActiveScheduleTab('pagos')}
+                      className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all ${activeScheduleTab === 'pagos' ? 'bg-brand-primary text-white shadow-md' : 'text-brand-text/40'}`}
+                    >
+                      Pagos
+                    </button>
+                  </div>
                 </div>
                 <div className="grid grid-cols-2 gap-12 pt-4 border-t border-brand-border/10">
                   <div>
@@ -1743,66 +1838,111 @@ export default function App() {
                 </div>
               </div>
 
-                  <div className="flex-1 overflow-y-auto p-10 bg-white text-slate-900 selection:bg-brand-primary" id="schedule-content">
-                    <div className="text-center mb-8 border-b-2 border-brand-primary pb-4">
-                      <h2 className="text-4xl font-black text-brand-primary uppercase tracking-tighter">PRESTAFÁCIL</h2>
-                      <p className="text-[10px] font-black tracking-[0.3em] text-slate-400 uppercase mt-2">Plan de Pagos Detallado</p>
-                    </div>
-                    
-                    <div className="grid grid-cols-2 gap-8 mb-8 text-[10px]">
-                       <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
-                          <p className="text-[9px] font-black text-slate-400 uppercase mb-1">Cliente</p>
-                          <p className="font-bold uppercase text-slate-900">{currentLoan.client}</p>
-                       </div>
-                       <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
-                          <p className="text-[9px] font-black text-slate-400 uppercase mb-1">Monto Adeudado</p>
-                          <p className="font-bold text-slate-900">{formatMoney(currentLoan.debt)}</p>
-                       </div>
-                    </div>
+                  {activeScheduleTab === 'plan' ? (
+                    <>
+                      <div className="flex-1 overflow-y-auto p-10 bg-white text-slate-900 selection:bg-brand-primary" id="schedule-content">
+                        <div className="text-center mb-8 border-b-2 border-brand-primary pb-4">
+                          <h2 className="text-4xl font-black text-brand-primary uppercase tracking-tighter">PRESTAFÁCIL</h2>
+                          <p className="text-[10px] font-black tracking-[0.3em] text-slate-400 uppercase mt-2">Plan de Pagos Detallado</p>
+                        </div>
+                        
+                        <div className="grid grid-cols-2 gap-8 mb-8 text-[10px]">
+                           <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                              <p className="text-[9px] font-black text-slate-400 uppercase mb-1">Cliente</p>
+                              <p className="font-bold uppercase text-slate-900">{currentLoan.client}</p>
+                           </div>
+                           <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                              <p className="text-[9px] font-black text-slate-400 uppercase mb-1">Monto Adeudado</p>
+                              <p className="font-bold text-slate-900">{formatMoney(currentLoan.debt)}</p>
+                           </div>
+                        </div>
 
-                    <table className="w-full text-left">
-                       <thead>
-                          <tr className="border-b-2 border-slate-100">
-                             <th className="py-2 text-[10px] font-black text-slate-400 uppercase">No.</th>
-                             <th className="py-2 text-[10px] font-black text-slate-400 uppercase">Vencimiento</th>
-                             <th className="py-2 text-[10px] font-black text-slate-400 uppercase text-right">Monto</th>
-                             <th className="py-2 text-[10px] font-black text-slate-400 uppercase text-right">Estado</th>
-                          </tr>
-                       </thead>
-                       <tbody className="divide-y divide-slate-100">
-                          {calculateSchedule(currentLoan).map(s => (
-                             <tr key={s.num}>
-                                <td className="py-3 font-bold text-xs text-slate-900">{s.num}</td>
-                                <td className="py-3 font-bold text-xs text-slate-900">{s.date}</td>
-                                <td className="py-3 font-bold text-xs text-right font-mono text-slate-900">{formatMoney(s.amount)}</td>
-                                <td className={`py-3 font-black text-[9px] text-right uppercase ${s.status === 'PAGADO' ? 'text-brand-green' : s.status === 'MORA' ? 'text-brand-red' : 'text-brand-primary'}`}>{s.status}</td>
-                             </tr>
-                          ))}
-                       </tbody>
-                    </table>
-                  </div>
+                        <table className="w-full text-left">
+                           <thead>
+                              <tr className="border-b-2 border-slate-100">
+                                 <th className="py-2 text-[10px] font-black text-slate-400 uppercase">No.</th>
+                                 <th className="py-2 text-[10px] font-black text-slate-400 uppercase">Vencimiento</th>
+                                 <th className="py-2 text-[10px] font-black text-slate-400 uppercase text-right">Monto</th>
+                                 <th className="py-2 text-[10px] font-black text-slate-400 uppercase text-right">Estado</th>
+                              </tr>
+                           </thead>
+                           <tbody className="divide-y divide-slate-100">
+                              {calculateSchedule(currentLoan).map(s => (
+                                 <tr key={s.num}>
+                                    <td className="py-3 font-bold text-xs text-slate-900">{s.num}</td>
+                                    <td className="py-3 font-bold text-xs text-slate-900">{s.date}</td>
+                                    <td className="py-3 font-bold text-xs text-right font-mono text-slate-900">{formatMoney(s.amount)}</td>
+                                    <td className={`py-3 font-black text-[9px] text-right uppercase ${s.status === 'PAGADO' ? 'text-brand-green' : s.status === 'MORA' ? 'text-brand-red' : 'text-brand-primary'}`}>{s.status}</td>
+                                 </tr>
+                              ))}
+                           </tbody>
+                        </table>
+                      </div>
 
-                  <div className="flex-1 overflow-y-auto px-8 py-6 space-y-3 bg-brand-bg shadow-inner">
-                {calculateSchedule(currentLoan).map((s) => (
-                  <div key={s.num} className={`bg-brand-surface p-4 rounded-xl border border-brand-border flex justify-between items-center ${s.status === 'PAGADO' ? 'opacity-30' : 'shadow-sm'}`}>
-                    <div className="flex items-center gap-4">
-                      <div className="w-8 h-8 rounded bg-brand-bg border border-brand-border flex items-center justify-center font-bold text-[10px] text-brand-text/40">
-                        {s.num}
+                      <div className="flex-1 overflow-y-auto px-8 py-6 space-y-3 bg-brand-bg shadow-inner">
+                        {calculateSchedule(currentLoan).map((s) => (
+                          <div key={s.num} className={`bg-brand-surface p-4 rounded-xl border border-brand-border flex justify-between items-center ${s.status === 'PAGADO' ? 'opacity-30' : 'shadow-sm'}`}>
+                            <div className="flex items-center gap-4">
+                              <div className="w-8 h-8 rounded bg-brand-bg border border-brand-border flex items-center justify-center font-bold text-[10px] text-brand-text/40">
+                                {s.num}
+                              </div>
+                              <div>
+                                <p className="font-black text-sm text-brand-text font-mono">
+                                  {formatMoney(s.amount)}
+                                  {s.mora > 0 && <span className="text-[9px] text-brand-red ml-2 uppercase">Incluye Mora {formatMoney(s.mora)}</span>}
+                                </p>
+                                <p className="text-[9px] font-bold text-brand-text/30 uppercase">{s.date}</p>
+                              </div>
+                            </div>
+                            <div className={`text-[9px] font-black uppercase px-3 py-1.5 rounded border ${s.status === 'PAGADO' ? 'bg-brand-green/10 text-brand-green border-brand-green/20' : s.status === 'MORA' ? 'bg-brand-red/10 text-brand-red border-brand-red/20' : 'bg-brand-primary/10 text-brand-primary border-brand-primary/20'}`}>
+                              {s.status === 'PAGADO' ? <Check className="w-3 h-3" /> : s.status}
+                            </div>
+                          </div>
+                        ))}
                       </div>
-                      <div>
-                        <p className="font-black text-sm text-brand-text font-mono">
-                          {formatMoney(s.amount)}
-                          {s.mora > 0 && <span className="text-[9px] text-brand-red ml-2 uppercase">Incluye Mora {formatMoney(s.mora)}</span>}
-                        </p>
-                        <p className="text-[9px] font-bold text-brand-text/30 uppercase">{s.date}</p>
-                      </div>
+                    </>
+                  ) : (
+                    <div className="flex-1 overflow-y-auto px-8 py-6 bg-brand-bg space-y-4">
+                      {transactions
+                        .filter(t => t.loanId === currentLoan.id || (t.concept.includes('Abono') && t.concept.includes(currentLoan.client)))
+                        .length === 0 ? (
+                          <div className="text-center py-20 text-brand-text/20 font-black uppercase text-xs">No hay pagos registrados</div>
+                        ) : (
+                          transactions
+                            .filter(t => t.loanId === currentLoan.id || (t.concept.includes('Abono') && t.concept.includes(currentLoan.client)))
+                            .map(t => (
+                              <div key={t.id} className="bg-brand-surface p-6 rounded-2xl border border-brand-border flex items-center justify-between group">
+                                <div className="flex items-center gap-4">
+                                  <div className="bg-brand-green/10 p-3 rounded-xl border border-brand-green/20 text-brand-green">
+                                    <ArrowDownRight className="w-5 h-5" />
+                                  </div>
+                                  <div>
+                                    <p className="text-lg font-black text-brand-text font-mono tracking-tighter">{formatMoney(t.amount)}</p>
+                                    <p className="text-[9px] font-black text-brand-text/30 uppercase">{new Date(t.date).toLocaleString('es-DO')}</p>
+                                  </div>
+                                </div>
+                                <div className="flex gap-2">
+                                  <button 
+                                    onClick={() => handlePrintOldReceipt(t)}
+                                    className="p-3 bg-brand-secondary text-brand-text/50 rounded-lg hover:text-brand-primary transition-all border border-brand-border"
+                                    title="Volver a imprimir recibo"
+                                  >
+                                    <Printer className="w-4 h-4" />
+                                  </button>
+                                  <button 
+                                    onClick={() => handleReversePayment(t)}
+                                    className="p-3 bg-brand-red/5 text-brand-red/30 rounded-lg hover:text-brand-red hover:bg-brand-red/10 transition-all border border-brand-red/10"
+                                    title="Reversar pago"
+                                  >
+                                    <Trash className="w-4 h-4" />
+                                  </button>
+                                </div>
+                              </div>
+                            ))
+                        )
+                      }
                     </div>
-                    <div className={`text-[9px] font-black uppercase px-3 py-1.5 rounded border ${s.status === 'PAGADO' ? 'bg-brand-green/10 text-brand-green border-brand-green/20' : s.status === 'MORA' ? 'bg-brand-red/10 text-brand-red border-brand-red/20' : 'bg-brand-primary/10 text-brand-primary border-brand-primary/20'}`}>
-                      {s.status === 'PAGADO' ? <Check className="w-3 h-3" /> : s.status}
-                    </div>
-                  </div>
-                ))}
-              </div>
+                  )}
 
               <div className="p-8 border-t border-brand-border flex gap-4 bg-brand-surface">
                 <button 
