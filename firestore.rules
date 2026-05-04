@@ -29,31 +29,27 @@ service cloud.firestore {
 
     // Pillar 2: Validation Blueprints
     function isValidLoan(data) {
-      let requiredFields = ['client', 'date', 'debt', 'remaining', 'principal', 'status', 'freqDays', 'installments'];
-      let optionalFields = ['phone', 'idNumber', 'address', 'workplace', 'interestRate', 'fixedQuota', 'progress', 'createdAt'];
+      let requiredFields = ['client', 'date', 'debt', 'remaining', 'principal', 'status'];
+      let optionalFields = ['phone', 'idNumber', 'address', 'workplace', 'interestRate', 'fixedQuota', 'progress', 'createdAt', 'updatedAt', 'freqDays', 'installments'];
       return data.keys().hasAll(requiredFields)
         && data.keys().size() <= (requiredFields.size() + optionalFields.size())
-        && data.client is string && data.client.size() <= 100
-        && data.date is string && data.date.size() <= 20
-        && data.debt is number && data.debt >= 0
-        && data.remaining is number && data.remaining >= 0
-        && data.principal is number && data.principal >= 0
-        && data.status in ['ACTIVO', 'PAGADO', 'RENOVADO']
-        && data.freqDays is number
-        && data.installments is number
-        && data.get('phone', '') is string && data.get('phone', '').size() <= 20
-        && (data.get('interestRate', 0) == null || data.get('interestRate', 0) is number)
-        && (data.get('fixedQuota', 0) == null || data.get('fixedQuota', 0) is number);
+        && data.client is string && data.client.size() <= 120
+        && data.date is string
+        && data.debt is number
+        && data.remaining is number
+        && data.principal is number
+        && data.status in ['ACTIVO', 'PAGADO', 'RENOVADO', 'MORA'];
     }
 
     function isValidTransaction(data) {
       let requiredFields = ['type', 'amount', 'concept', 'date'];
+      let optionalFields = ['loanId', 'clientName', 'updatedAt'];
       return data.keys().hasAll(requiredFields)
-        && data.keys().size() == requiredFields.size()
+        && data.keys().size() <= (requiredFields.size() + optionalFields.size())
         && data.type in ['INYECCION', 'RETIRO']
-        && data.amount is number && data.amount >= 0
-        && data.concept is string && data.concept.size() <= 500
-        && data.date is string && data.date.size() <= 60;
+        && data.amount is number
+        && data.concept is string && data.concept.size() <= 1000
+        && data.date is string;
     }
 
     // Match Rules
@@ -72,12 +68,12 @@ service cloud.firestore {
         allow update: if isOwner(userId) 
           && isValidLoan(incoming())
           && (
-            // Action: Edit Profile (Allow changing everything except immutable structure like principal)
-            (incoming().diff(existing()).affectedKeys().hasOnly(['client', 'phone', 'idNumber', 'address', 'workplace', 'status', 'remaining', 'progress', 'interestRate', 'fixedQuota'])) ||
-            // Action: Process Payment
-            (incoming().diff(existing()).affectedKeys().hasOnly(['remaining', 'progress', 'status'])) ||
+            // Action: Edit Profile
+            (incoming().diff(existing()).affectedKeys().hasOnly(['client', 'phone', 'idNumber', 'address', 'workplace', 'status', 'remaining', 'progress', 'interestRate', 'fixedQuota', 'updatedAt', 'freqDays', 'installments'])) ||
+            // Action: Process Payment / Reversal
+            (incoming().diff(existing()).affectedKeys().hasOnly(['remaining', 'progress', 'status', 'updatedAt'])) ||
             // Action: Renew
-            (incoming().diff(existing()).affectedKeys().hasOnly(['status', 'remaining', 'progress']))
+            (incoming().diff(existing()).affectedKeys().hasOnly(['status', 'remaining', 'progress', 'updatedAt']))
           );
         
         allow delete: if isOwner(userId);
@@ -91,7 +87,7 @@ service cloud.firestore {
           && isValidTransaction(incoming()) 
           && isValidId(transactionId);
           
-        allow update: if false; // Transactions are immutable
+        allow update: if isOwner(userId) && isValidTransaction(incoming());
         allow delete: if isOwner(userId);
       }
     }

@@ -9,7 +9,7 @@ import {
   CheckCircle2, Calendar, FileText, Printer, X, 
   MessageCircle, Edit, Trash2, AlertCircle, 
   History, ArrowDownRight, ArrowUpRight, Cloud, ListChecks, 
-  Phone, Home, Briefcase, Check, Lock, Trash, Upload, Download,
+  Phone, Home, Briefcase, Check, Lock, Trash, Upload, Download, Database,
   MapPin, User, Moon, Sun, LogOut
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -25,7 +25,7 @@ import {
 } from 'firebase/auth';
 import { 
   getFirestore, collection, onSnapshot, doc, addDoc, updateDoc, 
-  deleteDoc, writeBatch, query, orderBy, getDocFromServer 
+  deleteDoc, writeBatch, query, orderBy, getDocFromServer, getDoc, serverTimestamp 
 } from 'firebase/firestore';
 
 import firebaseConfig from '../firebase-applet-config.json';
@@ -45,6 +45,7 @@ interface Loan {
   address?: string;
   workplace?: string;
   date: string;
+  startDate?: string;
   progress: number;
   debt: number;
   remaining: number;
@@ -100,16 +101,22 @@ export default function App() {
   const [showEditModal, setShowEditModal] = useState(false);
   const [showContractModal, setShowContractModal] = useState(false);
   const [showRenewModal, setShowRenewModal] = useState(false);
+  const [showEditTransactionModal, setShowEditTransactionModal] = useState(false);
+  const [selectedTransaction, setSelectedTransaction] = useState<Transaction | null>(null);
+  const [editTransactionForm, setEditTransactionForm] = useState({ amount: '', concept: '', date: '' });
   
   // Formularios
   const [migrationText, setMigrationText] = useState('');
   const [receiptDate, setReceiptDate] = useState('');
   const [activeScheduleTab, setActiveScheduleTab] = useState<'plan' | 'pagos'>('plan');
   const [paymentAmount, setPaymentAmount] = useState('');
+  const [lastPaidAmount, setLastPaidAmount] = useState(0);
   const [newLoanForm, setNewLoanForm] = useState({
     client: '', phone: '', idNumber: '', address: '', workplace: '', calcMethod: 'interes', capital: '', interestRate: '', fixedQuota: '', installments: '', freqDays: '15'
   });
-  const [editForm, setEditForm] = useState({ client: '', phone: '', idNumber: '', address: '', workplace: '', debt: '', remaining: '', status: '' });
+  const [editForm, setEditForm] = useState({ client: '', phone: '', idNumber: '', address: '', workplace: '', debt: '', remaining: '', status: '', fixedQuota: '' });
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
   const [renewForm, setRenewForm] = useState({ capital: '', calcMethod: 'interes', interestRate: '', fixedQuota: '', installments: '' });
   const [cashForm, setCashForm] = useState({ type: 'INYECCION' as 'INYECCION' | 'RETIRO', amount: '', concept: '' });
 
@@ -235,10 +242,25 @@ export default function App() {
   const totals = useMemo(() => {
     const caja = transactions.reduce((t, tr) => tr.type === 'RETIRO' ? t - tr.amount : t + tr.amount, 0);
     const calle = loans.reduce((t, l) => l.status === 'ACTIVO' ? t + l.remaining : t, 0);
-    const ganancia = loans.reduce((t, l) => t + (Number(l.debt || 0) - Number(l.principal || 0)), 0);
+    
+    // Utilidad Real = Interés efectivamente cobrado basado en el historial de transacciones
+    // Calculado proporcionalmente por el ratio de interés de cada préstamo
+    const ganancia = transactions.reduce((t, tr) => {
+      const concept = tr.concept.toLowerCase();
+      const isCollection = concept.includes('abono') || concept.includes('cobro') || concept.includes('pago') || concept.includes('renovación') || concept.includes('recaudo') || concept.includes('recaudar');
+      if (!isCollection) return t;
+
+      const loan = loans.find(l => l.id === tr.loanId);
+      if (loan && loan.debt > 0) {
+        const interestRatio = (loan.debt - loan.principal) / loan.debt;
+        return t + (tr.amount * interestRatio);
+      }
+      return t;
+    }, 0);
+
     const recaudado = transactions.reduce((t, tr) => {
       const concept = tr.concept.toLowerCase();
-      if (concept.includes('abono') || concept.includes('cobro') || concept.includes('pago')) {
+      if (concept.includes('abono') || concept.includes('cobro') || concept.includes('pago') || concept.includes('recaudo') || concept.includes('recaudar')) {
         return t + tr.amount;
       }
       return t;
@@ -255,7 +277,59 @@ export default function App() {
     });
   }, [loans]);
 
+  const [showGrowthModal, setShowGrowthModal] = useState(false);
+  
+  // Formatos
   const formatMoney = (n: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n || 0);
+
+  // Estadísticas de Crecimiento Real
+  const growthStats = useMemo(() => {
+    const monthlyData: Record<string, { total: number, interest: number, count: number }> = {};
+    const annualData: Record<string, { total: number, interest: number }> = {};
+
+    transactions.forEach(tr => {
+      const concept = tr.concept.toLowerCase();
+      const isCollection = concept.includes('abono') || concept.includes('cobro') || concept.includes('pago') || concept.includes('renovación') || concept.includes('recaudo') || concept.includes('recaudar');
+      if (!isCollection) return;
+
+      // Intentar analizar la fecha de forma robusta
+      let date: Date;
+      if (typeof tr.date === 'number') {
+        date = new Date(tr.date);
+      } else if (typeof tr.date === 'string' && tr.date.includes('/')) {
+        const parts = tr.date.split('/');
+        date = new Date(`${parts[1]}/${parts[0]}/${parts[2]}`);
+      } else {
+        date = new Date(tr.date);
+      }
+
+      if (isNaN(date.getTime())) return;
+
+      const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+      const yearKey = `${date.getFullYear()}`;
+
+      if (!monthlyData[monthKey]) monthlyData[monthKey] = { total: 0, interest: 0, count: 0 };
+      if (!annualData[yearKey]) annualData[yearKey] = { total: 0, interest: 0 };
+
+      monthlyData[monthKey].total += tr.amount;
+      monthlyData[monthKey].count += 1;
+      annualData[yearKey].total += tr.amount;
+
+      // Calcular proporción de interés real percibido
+      const loan = loans.find(l => l.id === tr.loanId);
+      if (loan && loan.debt > 0) {
+        const interestRatio = (loan.debt - loan.principal) / loan.debt;
+        const interestAmount = tr.amount * interestRatio;
+        monthlyData[monthKey].interest += interestAmount;
+        annualData[yearKey].interest += interestAmount;
+      }
+    });
+
+    return { 
+      monthly: Object.entries(monthlyData).sort((a, b) => b[0].localeCompare(a[0])),
+      annual: Object.entries(annualData).sort((a, b) => b[0].localeCompare(a[0]))
+    };
+  }, [transactions, loans]);
 
   // Sistema de Notificaciones
   const requestNotificationPermission = async () => {
@@ -621,87 +695,6 @@ export default function App() {
     }
   };
 
-  const printElement = (elementId: string) => {
-    const content = document.getElementById(elementId);
-    if (!content) return;
-    
-    // Create a hidden iframe for printing to avoid popup blockers and handle styles better
-    const iframe = document.createElement('iframe');
-    iframe.style.position = 'fixed';
-    iframe.style.right = '0';
-    iframe.style.bottom = '0';
-    iframe.style.width = '0';
-    iframe.style.height = '0';
-    iframe.style.border = '0';
-    document.body.appendChild(iframe);
-    
-    const doc = iframe.contentWindow?.document;
-    if (!doc) return;
-
-    doc.write(`
-      <html>
-        <head>
-          <title>Imprimir</title>
-          <style>
-             @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&display=swap');
-             body { 
-               font-family: 'Inter', sans-serif; 
-               padding: 40px; 
-               background: white;
-               color: black;
-               -webkit-print-color-adjust: exact;
-             }
-             /* Ensure no oklch colors are used in the print view by providing fallback colors or simple styles */
-             .text-center { text-align: center; }
-             .font-black { font-weight: 900; }
-             .font-bold { font-weight: 700; }
-             .uppercase { text-transform: uppercase; }
-             .tracking-tighter { letter-spacing: -0.05em; }
-             .text-2xl { font-size: 1.5rem; }
-             .text-sm { font-size: 0.875rem; }
-             .mb-1 { margin-bottom: 0.25rem; }
-             .mb-6 { margin-bottom: 1.5rem; }
-             .px-1 { padding-left: 0.25rem; padding-right: 0.25rem; }
-             .underline { text-decoration: underline; }
-             .border-b-2 { border-bottom-width: 2px; }
-             .border-doc-primary { border-color: #0f172a; }
-             .bg-doc-bg { background-color: #f8fafc; }
-             .text-doc-secondary { color: #64748b; }
-             .text-doc-primary { color: #0f172a; }
-             .text-doc-accent { color: #dc2626; }
-             .text-slate-900 { color: #0f172a; }
-             .text-red-600 { color: #dc2626; }
-             .p-6 { padding: 1.5rem; }
-             .border-l-4 { border-left-width: 4px; }
-             .italic { font-style: italic; }
-             .space-y-8 > * + * { margin-top: 2rem; }
-             .grid { display: grid; }
-             .grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-             .gap-20 { gap: 5rem; }
-             .pt-20 { padding-top: 5rem; }
-             .pt-3 { padding-top: 0.75rem; }
-             .text-slate-500 { color: #64748b; }
-             .text-slate-400 { color: #64748b; }
-             .text-brand-text { color: #0d0d0d; }
-             .text-brand-primary { color: #007acc; }
-          </style>
-        </head>
-        <body>
-          ${content.innerHTML}
-          <script>
-            window.onload = function() {
-              window.focus();
-              window.print();
-              setTimeout(() => {
-                window.frameElement.remove();
-              }, 500);
-            };
-          </script>
-        </body>
-      </html>
-    `);
-    doc.close();
-  };
 
   const handleClientNameChange = (name: string) => {
     const existingClient = uniqueClients.find(c => c.client.toLowerCase() === name.toLowerCase());
@@ -721,7 +714,9 @@ export default function App() {
     
     // Parse loan starting date correctly
     let startDate = new Date();
-    if (loan.date) {
+    if (loan.startDate) {
+      startDate = new Date(loan.startDate);
+    } else if (loan.date) {
       const parts = loan.date.split('/');
       if (parts.length === 3) {
         // dd/mm/yyyy -> mm/dd/yyyy for Date constructor
@@ -729,9 +724,15 @@ export default function App() {
       }
     }
     
+    if (isNaN(startDate.getTime())) startDate = new Date(); // Fallback if still invalid
+    
     const freq = Number(loan.freqDays || 15);
     const totalInst = Math.max(1, Number(loan.installments || 1));
-    const quotaAmount = (Number(loan.debt || 0) / totalInst);
+    
+    // Si existe una cuota fija definida, usarla. Si no, calcular debt / installments.
+    const quotaAmount = loan.fixedQuota && loan.fixedQuota > 0 
+      ? loan.fixedQuota 
+      : (Number(loan.debt || 0) / totalInst);
     
     let totalPaid = Number(loan.debt || 0) - Number(loan.remaining || 0);
     const today = new Date();
@@ -742,13 +743,14 @@ export default function App() {
       dueDate.setDate(startDate.getDate() + (freq * i));
       dueDate.setHours(0, 0, 0, 0);
       
-      let isPaid = false;
-      if (totalPaid >= (quotaAmount - 0.01)) {
-        isPaid = true;
-        totalPaid -= quotaAmount;
-      } else {
-        totalPaid = 0;
+      let amountDue = quotaAmount;
+      if (totalPaid > 0) {
+        const paymentApplied = Math.min(totalPaid, quotaAmount);
+        amountDue -= paymentApplied;
+        totalPaid -= paymentApplied;
       }
+      
+      const isPaid = amountDue <= 0.01;
 
       // Late Fee (Mora) calculation
       let moraAmount = 0;
@@ -767,17 +769,15 @@ export default function App() {
       schedule.push({ 
         num: i, 
         date: dueDate.toLocaleDateString('es-DO', {day: '2-digit', month: 'short', year: 'numeric'}), 
-        amount: quotaAmount + moraAmount,
-        baseAmount: quotaAmount,
+        timestamp: dueDate.getTime(),
+        amount: quotaAmount, // Monto FIJO acordado
+        amountDue: Math.max(0, amountDue),
         mora: moraAmount,
         status: status
       });
     }
     return schedule;
   };
-
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [formError, setFormError] = useState<string | null>(null);
 
   const handleSaveNewLoan = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -815,6 +815,7 @@ export default function App() {
         address: newLoanForm.address?.trim() || '', 
         workplace: newLoanForm.workplace?.trim() || '',
         date: new Date().toLocaleDateString('es-DO'), 
+        startDate: new Date().toISOString(), // Use ISO for reliable parsing
         progress: 0, 
         debt: Number(total.toFixed(2)), 
         remaining: Number(total.toFixed(2)), 
@@ -860,20 +861,21 @@ export default function App() {
     try {
       const batch = writeBatch(db);
       
-      // 1. Update Loan
       const loanRef = doc(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'loans', currentLoan.id);
-      batch.update(loanRef, { 
+      const updateData = { 
         remaining: Number(resta.toFixed(2)), 
         progress: progress, 
-        status: resta <= 0.01 ? 'PAGADO' : 'ACTIVO' 
-      });
+        status: (resta <= 0.01) ? 'PAGADO' : 'ACTIVO',
+        updatedAt: serverTimestamp()
+      };
+      
+      batch.update(loanRef, updateData);
 
-      // 2. Create Transaction
       const transRef = doc(collection(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'transactions'));
       batch.set(transRef, { 
         type: 'INYECCION', 
         amount: monto, 
-        concept: `Abono Cuota - ${currentLoan.client}`, 
+        concept: `Recaudo Cuota - ${currentLoan.client}`, 
         loanId: currentLoan.id,
         clientName: currentLoan.client,
         date: now
@@ -881,11 +883,18 @@ export default function App() {
 
       await batch.commit();
 
+      setLastPaidAmount(monto);
       setReceiptDate(new Date(now).toLocaleDateString());
       sendPaymentAlert(currentLoan.client, monto);
 
+      // Actualizar estado local
+      setLoans(prev => prev.map(l => l.id === currentLoan.id ? { ...l, ...updateData } : l));
+      setCurrentLoan(prev => prev ? { ...prev, ...updateData } : null);
+
+      setPaymentAmount('');
       setShowPaymentModal(false); 
       setShowReceiptModal(true);
+      toast.success("Pago registrado correctamente");
     } catch (err: any) { 
       console.error("Payment error:", err);
       setFormError("Error al registrar pago: " + err.message); 
@@ -893,68 +902,274 @@ export default function App() {
     finally { setIsSubmitting(false); }
   };
 
-  const handleReversePayment = async (tr: Transaction) => {
-    if (!user) return;
-    if (!confirm("⚠️ ¿ESTÁ SEGURO DE REVERSAR ESTE PAGO?\n\n- Se eliminará del historial de caja.\n- Se devolverá el monto al saldo del préstamo.\n- El estado del préstamo volverá a ser 'ACTIVO' si estaba pagado.")) return;
-
+  const handleDeleteLoan = async (loanToDelete?: any) => {
+    // Si viene de un evento onChange/onClick sin parámetros, loanToDelete será el evento
+    const targetLoan = (loanToDelete && typeof loanToDelete === 'object' && 'id' in loanToDelete) ? loanToDelete : currentLoan;
+    console.log("Attempting to delete loan:", targetLoan?.id);
+    if (!targetLoan || !user) {
+      console.error("Target loan or user missing");
+      return;
+    }
+    if (!window.confirm(`⚠️ ¿ELIMINAR PRÉSTAMO POR COMPLETO?\n\nSe borrará a ${targetLoan.client} y todo su historial de pagos de forma permanente.\n\nEsta acción NO se puede deshacer.`)) return;
+    
+    setIsSubmitting(true);
     try {
-      let loanId = tr.loanId;
-      if (!loanId) {
-        // Fallback: tratar de encontrar el préstamo por clientName o por concepto
-        const loan = loans.find(l => l.id === tr.loanId) || 
-                     loans.find(l => l.client === tr.clientName) || 
-                     loans.find(l => tr.concept.includes(l.client) && l.status !== 'RENOVADO');
+      const loanRef = doc(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'loans', targetLoan.id);
+      await deleteDoc(loanRef);
+      
+      setShowEditModal(false);
+      setShowScheduleModal(false);
+      setShowPaymentModal(false);
+      if (currentLoan?.id === targetLoan.id) setCurrentLoan(null);
+      toast.success("Préstamo eliminado correctamente");
+    } catch (err: any) {
+      console.error("Delete Error:", err);
+      toast.error("Error al eliminar: " + err.message);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleClearPastLoans = async () => {
+    if (!user || pastLoans.length === 0) return;
+    const count = pastLoans.length;
+    if (!window.confirm(`⚠️ ¿BORRAR TODO EL HISTORIAL?\n\nSe eliminarán permanentemente los ${count} préstamos finalizados o cancelados de la historia.\n\nEsta acción NO se puede deshacer.`)) return;
+    
+    setIsSubmitting(true);
+    try {
+      const batch = writeBatch(db);
+      pastLoans.forEach(l => {
+        const loanRef = doc(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'loans', l.id);
+        batch.delete(loanRef);
+      });
+      await batch.commit();
+      toast.success("Historial borrado correctamente");
+    } catch (err: any) {
+      toast.error("Error al borrar historial: " + err.message);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleReversePayment = async (tr: Transaction) => {
+    if (!user || !tr) return;
+    if (!window.confirm(`⚠️ ADVERTENCIA: ¿Seguro que desea reversar el pago de ${formatMoney(tr.amount)}?\n\n- Se eliminará el registro de caja.\n- Se aumentará el saldo pendiente del préstamo.\n- El progreso se recalculará automáticamente.`)) return;
+
+    setIsSubmitting(true);
+    try {
+      let lId = tr.loanId;
+      if (!lId) {
+        const matchingLoan = loans.find(l => 
+          l.id === tr.loanId || 
+          normalize(l.client) === normalize(tr.clientName || "") ||
+          tr.concept.toLowerCase().includes(normalize(l.client))
+        );
+        if (matchingLoan) lId = matchingLoan.id;
+      }
+
+      if (!lId) {
+        toast.error("No se pudo identificar el préstamo para devolver los fondos.");
+        return;
+      }
+
+      const loanRef = doc(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'loans', lId);
+      const lSnap = await getDoc(loanRef);
+      
+      const batch = writeBatch(db);
+      // Eliminar transacción
+      batch.delete(doc(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'transactions', tr.id));
+
+      if (lSnap.exists()) {
+        const lData = lSnap.data();
+        const curRemaining = Number(lData.remaining || 0);
+        const newRemaining = Number((curRemaining + tr.amount).toFixed(2));
+        const debt = Number(lData.debt || 1);
         
-        if (loan) {
-          loanId = loan.id;
-        } else {
-          toast.error("No se pudo vincular esta transacción con un préstamo específico.");
-          return;
+        // Actualizar préstamo: volver a ACTIVO y sumar el monto reversado
+        batch.update(loanRef, {
+          remaining: newRemaining,
+          progress: Math.max(0, Math.min(100, Math.round(((debt - newRemaining) / debt) * 100))),
+          status: 'ACTIVO',
+          updatedAt: serverTimestamp()
+        });
+
+        // Actualización local para UI inmediata
+        if (currentLoan && lId === currentLoan.id) {
+          setCurrentLoan(prev => prev ? {
+            ...prev,
+            remaining: newRemaining,
+            progress: Math.max(0, Math.min(100, Math.round(((debt - newRemaining) / debt) * 100))),
+            status: 'ACTIVO'
+          } : null);
         }
       }
 
-      await applyReversal(loanId, tr);
+      await batch.commit();
+      toast.success("Pago reversado y saldo actualizado");
     } catch (error: any) {
+      console.error("Reverse Error:", error);
       toast.error("Error al reversar: " + error.message);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
-  const applyReversal = async (loanId: string, tr: Transaction) => {
-    if (!user) return;
-    const loanRef = doc(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'loans', loanId);
-    const loanDoc = loans.find(l => l.id === loanId);
-    
-    if (!loanDoc) throw new Error("Préstamo no encontrado.");
+  const normalize = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+  
+  const findMatchingTransaction = (loan: Loan, scheduleEntry?: any) => {
+    if (!loan || !transactions.length) return null;
+    const scheduleTime = scheduleEntry ? (scheduleEntry.timestamp || new Date(scheduleEntry.date).getTime()) : null;
+    const cNameNorm = normalize(loan.client || "");
 
-    const batch = writeBatch(db);
-    
-    // 1. Delete transaction
-    batch.delete(doc(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'transactions', tr.id));
+    // Prioridad 1: Buscar por ID de Préstamo + Número de Cuota (Máxima precisión para nuevos pagos)
+    if (scheduleEntry) {
+      const idNumMatch = transactions.find(t => 
+        t.loanId === loan.id && 
+        t.installmentNum === scheduleEntry.num &&
+        t.amount > 0
+      );
+      if (idNumMatch) return idNumMatch;
 
-    // 2. Update loan
-    const newRemaining = Number((loanDoc.remaining + tr.amount).toFixed(2));
-    batch.update(loanRef, {
-      remaining: newRemaining,
-      progress: Math.round(((loanDoc.debt - newRemaining) / loanDoc.debt) * 100),
-      status: 'ACTIVO'
+      // Prioridad 2: Buscar por concepto específico (CUOTA X)
+      const conceptMatch = transactions.find(t => 
+        t.loanId === loan.id && 
+        t.amount > 0 && 
+        normalize(t.concept || "").includes(`cuota ${scheduleEntry.num}`)
+      );
+      if (conceptMatch) return conceptMatch;
+    }
+
+    // Prioridad 3: ID de Préstamo + Monto Exacto + Cercanía Temporal
+    let filtered = transactions.filter(t => t.loanId === loan.id && t.amount > 0);
+    
+    if (scheduleEntry && filtered.length > 0) {
+      // Buscar uno que tenga el mismo monto (+/- un margen de error por mora o redondeo)
+      const targetAmount = scheduleEntry.amount;
+      const amountMatches = filtered.filter(t => Math.abs(t.amount - targetAmount) < 0.1);
+      
+      if (amountMatches.length > 0) {
+        return amountMatches.sort((a, b) => {
+          if (!scheduleTime) return new Date(b.date).getTime() - new Date(a.date).getTime();
+          return Math.abs(new Date(a.date).getTime() - scheduleTime) - Math.abs(new Date(b.date).getTime() - scheduleTime);
+        })[0];
+      }
+    }
+
+    // Prioridad 4: Cercanía temporal simple (ID de Préstamo)
+    if (filtered.length > 0) {
+      return filtered.sort((a, b) => {
+        if (!scheduleTime) return new Date(b.date).getTime() - new Date(a.date).getTime();
+        return Math.abs(new Date(a.date).getTime() - scheduleTime) - Math.abs(new Date(b.date).getTime() - scheduleTime);
+      })[0];
+    }
+    
+    // Prioridad 5: Nombre / Concepto + Cercanía Temporal (Fallback total)
+    const fallback = transactions.filter(t => {
+      const tNameNorm = normalize(t.clientName || "");
+      const tConceptNorm = normalize(t.concept || "");
+      return t.amount > 0 && (tNameNorm === cNameNorm || tConceptNorm.includes(cNameNorm));
     });
 
-    await batch.commit();
-    toast.success("Pago reversado correctamente.");
-    setSystemMessage(`✅ Pago de ${formatMoney(tr.amount)} reversado.`);
+    if (fallback.length > 0) {
+      return fallback.sort((a, b) => {
+        if (!scheduleTime) return new Date(b.date).getTime() - new Date(a.date).getTime();
+        return Math.abs(new Date(a.date).getTime() - scheduleTime) - Math.abs(new Date(b.date).getTime() - scheduleTime);
+      })[0];
+    }
+
+    return null;
   };
+
+  const handleUpdateTransaction = async (tr: Transaction, newDetails: Partial<Transaction>) => {
+    if (!user || !tr) return;
+    setIsSubmitting(true);
+    try {
+      const trRef = doc(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'transactions', tr.id);
+      const batch = writeBatch(db);
+
+      // Si cambia el monto, actualizar saldo del préstamo
+      if (newDetails.amount !== undefined && newDetails.amount !== tr.amount) {
+        const diff = newDetails.amount - tr.amount;
+        let lId = tr.loanId;
+        if (!lId) {
+          const matchingLoan = loans.find(l => 
+            l.id === tr.loanId || 
+            normalize(l.client) === normalize(tr.clientName || "") ||
+            tr.concept.toLowerCase().includes(normalize(l.client))
+          );
+          if (matchingLoan) lId = matchingLoan.id;
+        }
+
+        if (lId) {
+          const loanRef = doc(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'loans', lId);
+          const lSnap = await getDoc(loanRef);
+          if (lSnap.exists()) {
+            const lData = lSnap.data();
+            const curRemaining = Number(lData.remaining || 0);
+            const newRemaining = Number((curRemaining - diff).toFixed(2));
+            const debt = Number(lData.debt || 1);
+            
+            batch.update(loanRef, {
+              remaining: newRemaining,
+              progress: Math.max(0, Math.min(100, Math.round(((debt - newRemaining) / debt) * 100))),
+              updatedAt: serverTimestamp()
+            });
+
+            if (currentLoan && lId === currentLoan.id) {
+              setCurrentLoan(prev => prev ? {
+                ...prev,
+                remaining: newRemaining
+              } : null);
+            }
+          }
+        }
+      }
+
+      batch.update(trRef, {
+        ...newDetails,
+        updatedAt: serverTimestamp()
+      });
+
+      await batch.commit();
+      toast.success("Movimiento actualizado");
+    } catch (err: any) {
+      console.error("Update Transaction Error:", err);
+      toast.error("Error al actualizar: " + err.message);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
 
   const handlePrintOldReceipt = (tr: Transaction) => {
     // Buscar el préstamo por ID, clientName o analizando el concepto
-    const loan = loans.find(l => l.id === tr.loanId) || 
-                 loans.find(l => l.client === tr.clientName) || 
-                 loans.find(l => tr.concept.includes(l.client) && l.status !== 'RENOVADO');
+    const tLoanId = tr.loanId || "";
+    const tClientNorm = normalize(tr.clientName || "");
+    const tConceptNorm = normalize(tr.concept || "");
+
+    const loan = loans.find(l => l.id === tLoanId) || 
+                 loans.find(l => {
+                   const cNameNorm = normalize(l.client || "");
+                   const nameParts = cNameNorm.split(' ').filter(p => p.length > 2);
+                   
+                   // Si el nombre grabado en la transacción coincide exactamente
+                   if (tClientNorm !== "" && cNameNorm === tClientNorm) return true;
+                   
+                   // Si el nombre del cliente del sistema está contenido en el concepto del movimiento
+                   if (tConceptNorm.includes(cNameNorm)) return true;
+
+                   // Si alguna parte importante del nombre del cliente está en el concepto
+                   if (nameParts.length > 0 && nameParts.some(part => tConceptNorm.includes(part))) return true;
+
+                   return false;
+                 });
 
     if (!loan) {
-      return toast.error("No se pudo encontrar el préstamo vinculado a esta transacción.");
+      return toast.error("No se pudo vincular esta transacción con un préstamo. Verifique que el nombre del cliente coincida con el registro del préstamo.");
     }
     
     setCurrentLoan(loan);
+    setLastPaidAmount(tr.amount);
     setPaymentAmount(String(tr.amount));
     setReceiptDate(new Date(tr.date).toLocaleDateString());
     setShowReceiptModal(true);
@@ -980,8 +1195,9 @@ export default function App() {
       // Recalcular progreso si cambia el saldo
       const debt = currentLoan.debt || 1; // Evitar división por cero
       const newProgress = Math.round(((debt - parsedRemaining) / debt) * 100);
+      const parsedFixedQuota = editForm.fixedQuota ? parseFloat(editForm.fixedQuota) : null;
 
-      await updateDoc(loanRef, {
+      const updateFields = {
         client: editForm.client.trim(),
         phone: editForm.phone.trim(),
         idNumber: editForm.idNumber ? editForm.idNumber.trim() : '',
@@ -989,10 +1205,17 @@ export default function App() {
         workplace: editForm.workplace ? editForm.workplace.trim() : '',
         status: editForm.status,
         remaining: parsedRemaining,
+        fixedQuota: parsedFixedQuota,
         progress: Math.max(0, Math.min(100, newProgress))
-      });
+      };
 
-      setShowEditModal(false);
+      await updateDoc(loanRef, updateFields);
+      
+      const updatedLoan = { ...currentLoan, ...updateFields };
+      setLoans(prev => prev.map(l => l.id === currentLoan.id ? updatedLoan : l));
+      setCurrentLoan(updatedLoan);
+
+      closeAllModals();
       toast.success("Información del cliente actualizada.");
       setSystemMessage("✅ Datos actualizados correctamente.");
     } catch (err: any) {
@@ -1010,7 +1233,175 @@ export default function App() {
     l.client.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
-  const closeAllModals = () => {
+  const handleDownloadPDF = async (elementId: string, filename: string) => {
+    const element = document.getElementById(elementId);
+    if (!element) {
+      toast.error("No se encontró el contenido para generar el PDF");
+      return;
+    }
+
+    const loadingToast = toast.loading("Generando PDF...");
+
+    try {
+      // Aplicar clase especial para desactivar oklch y ocultar botones
+      element.classList.add('pdf-capture-active');
+      const buttons = element.querySelectorAll('.no-print');
+      buttons.forEach((btn: any) => btn.style.setProperty('display', 'none', 'important'));
+
+      // Dar un pequeño respiro para que el DOM se actualice
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      const canvas = await html2canvas(element, {
+        scale: 2,
+        useCORS: true,
+        logging: false,
+        backgroundColor: '#ffffff',
+        windowWidth: element.scrollWidth,
+        windowHeight: element.scrollHeight,
+        onclone: (clonedDoc) => {
+          // 1. Force light mode and sanitize basic colors
+          const root = clonedDoc.documentElement;
+          root.classList.remove('dark');
+          root.style.colorScheme = 'light';
+          clonedDoc.body.style.backgroundColor = '#ffffff';
+          clonedDoc.body.style.color = '#000000';
+          
+          // 2. Brutal safety style to kill animations and force hex variables
+          // We include every possible variable that might be using oklch/oklab
+          const safetyStyle = clonedDoc.createElement('style');
+          safetyStyle.innerHTML = `
+            * {
+              transition: none !important;
+              animation: none !important;
+              transition-duration: 0s !important;
+              transition-property: none !important;
+            }
+            :root {
+              --bg: #ffffff !important;
+              --surface: #ffffff !important;
+              --card: #ffffff !important;
+              --border: #e2e8f0 !important;
+              --text: #000000 !important;
+              --text-muted: #64748b !important;
+              --text-dim: #94a3b8 !important;
+              --secondary: #f1f5f9 !important;
+              --brand-primary: #2563eb !important;
+              --brand-text: #000000 !important;
+              --brand-bg: #ffffff !important;
+              --tw-text-opacity: 1 !important;
+              --tw-bg-opacity: 1 !important;
+              --tw-border-opacity: 1 !important;
+              --color-brand-primary: #2563eb !important;
+              --color-slate-900: #0f172a !important;
+              --color-slate-800: #1e293b !important;
+              --color-slate-700: #334155 !important;
+              --color-slate-600: #475569 !important;
+              --color-slate-500: #64748b !important;
+              --tw-color-brand-primary: #2563eb !important;
+              --tw-color-brand-text: #000000 !important;
+              --tw-color-brand-bg: #ffffff !important;
+            }
+            body, .printable-area { 
+              background-color: #ffffff !important; 
+              color: #000000 !important; 
+            }
+          `;
+          clonedDoc.head.appendChild(safetyStyle);
+
+          // 3. Remove all LINK tags (external stylesheets) which might contain oklch/oklab
+          Array.from(clonedDoc.getElementsByTagName('link')).forEach(link => {
+            if (link.rel === 'stylesheet') {
+              link.remove();
+            }
+          });
+
+          // 4. Regex replacement in ALL internal style tags
+          // We use a broader regex to catch oklch/oklab even with complex parameters
+          Array.from(clonedDoc.getElementsByTagName('style')).forEach(tag => {
+            try {
+              let cssText = tag.innerHTML;
+              // Very aggressive replacement: find anything starting with oklch( or oklab( and matching until the closing paren
+              // We handle potential nesting with a slightly smarter (though not perfect) negative lookahead if needed
+              // or just match everything inside parens.
+              cssText = cssText.replace(/oklch\s*\([^)]+\)/gi, '#121212');
+              cssText = cssText.replace(/oklab\s*\([^)]+\)/gi, '#121212');
+              // Also catch the Tailwind 4 / opacity patterns: oklch(...) / 0.5
+              cssText = cssText.replace(/(oklch|oklab)\s*\([^)]+\)\s*\/\s*[0-9.]+/gi, '#121212');
+              tag.innerHTML = cssText;
+            } catch (e) {
+              console.warn("Style sanitization failed for a tag", e);
+            }
+          });
+
+          // 5. Force standard colors on the element and its children
+          const el = clonedDoc.getElementById(elementId);
+          if (el) {
+            el.style.setProperty('background-color', '#ffffff', 'important');
+            el.style.setProperty('color', '#000000', 'important');
+            
+            el.querySelectorAll('*').forEach((child: any) => {
+              if (child.style) {
+                child.style.setProperty('transition', 'none', 'important');
+                child.style.setProperty('animation', 'none', 'important');
+                
+                // Check all style properties
+                for (let i = 0; i < child.style.length; i++) {
+                  const prop = child.style[i];
+                  const val = child.style.getPropertyValue(prop);
+                  if (val && (val.toLowerCase().includes('oklch') || val.toLowerCase().includes('oklab'))) {
+                    // Try to map to something reasonable or just force black
+                    let fallback = '#333333';
+                    if (prop.includes('background')) fallback = '#ffffff';
+                    child.style.setProperty(prop, fallback, 'important');
+                  }
+                }
+              }
+              // Direct Tag overrides for typical text containers
+              if (['P', 'SPAN', 'H1', 'H2', 'H3', 'H4', 'H5', 'TD', 'TH', 'B', 'STRONG'].includes(child.tagName)) {
+                child.style.setProperty('color', '#000000', 'important');
+              }
+            });
+          }
+        }
+      });
+
+      const imgData = canvas.toDataURL('image/jpeg', 0.95);
+      const pdf = new jsPDF({
+        orientation: 'portrait',
+        unit: 'px',
+        format: [canvas.width, canvas.height]
+      });
+
+      pdf.addImage(imgData, 'JPEG', 0, 0, canvas.width, canvas.height);
+      pdf.save(`${filename}.pdf`);
+
+      // Restaurar estado
+      element.classList.remove('pdf-capture-active');
+      buttons.forEach((btn: any) => btn.style.display = '');
+      
+      toast.dismiss(loadingToast);
+      toast.success("PDF generado correctamente");
+    } catch (err) {
+      console.error("Error al generar PDF:", err);
+      toast.dismiss(loadingToast);
+      
+      // Fallback: If html2canvas fails, try to use just the window.print() but styled for PDF
+      toast.error("Error al generar el PDF. Intentando método alternativo...");
+      const element = document.getElementById(elementId);
+      if (element) {
+        element.classList.remove('pdf-capture-active');
+        const buttons = element.querySelectorAll('.no-print');
+        buttons.forEach((btn: any) => btn.style.display = '');
+      }
+      
+      setTimeout(() => {
+        window.print();
+      }, 500);
+    }
+  };
+
+  const closeAllModals = (e?: any) => {
+    if (e && e.stopPropagation) e.stopPropagation();
     setShowPaymentModal(false); 
     setShowReceiptModal(false); 
     setShowNewLoanModal(false); 
@@ -1020,8 +1411,18 @@ export default function App() {
     setShowEditModal(false); 
     setShowContractModal(false); 
     setShowMigrationModal(false);
-    setCurrentLoan(null); 
-    setSystemMessage(null);
+    setShowEditTransactionModal(false);
+    setShowGrowthModal(false);
+    
+    // Retrasar un poco la limpieza de datos para permitir que las animaciones terminen
+    setTimeout(() => {
+      setCurrentLoan(null); 
+      setSystemMessage(null);
+      setFormError(null);
+      setPaymentAmount('');
+      setMigrationText('');
+      setEditTransactionForm({ amount: '', concept: '', date: '' });
+    }, 300);
   };
 
   if (authLoading) {
@@ -1032,7 +1433,7 @@ export default function App() {
     );
   }
 
-  if (!user) {
+    if (!user) {
     return (
       <div className="min-h-screen bg-brand-bg flex items-center justify-center p-6 selection:bg-brand-primary/30">
         <Toaster position="top-right" richColors />
@@ -1044,110 +1445,59 @@ export default function App() {
           <div className="bg-brand-secondary w-20 h-20 rounded-2xl flex items-center justify-center mx-auto mb-6 border border-brand-border">
             <ShieldCheck className="w-10 h-10 text-brand-primary" />
           </div>
-          <h1 className="text-3xl font-black text-brand-text mb-2 tracking-tight uppercase text-center">PrestaFacil</h1>
-          <p className="text-brand-text/50 font-bold mb-8 uppercase text-[10px] tracking-widest leading-relaxed text-center">
-            Sistema de Gestión de Préstamos
-          </p>
+          <h1 className="text-2xl font-black text-center text-brand-text mb-2 uppercase tracking-tight">PRESTAFÁCIL</h1>
+          <p className="text-center text-brand-text/40 font-bold text-[10px] uppercase tracking-widest mb-8">Gestión de Cartera & Cobros</p>
           
-          <div className="space-y-6">
-            <form onSubmit={loginWithEmail} className="space-y-4">
-              <div className="space-y-2">
-                <label className="text-[10px] font-black uppercase text-brand-text/40 ml-1">Usuario (Correo)</label>
-                <div className="relative">
-                  <User className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-brand-text/30" />
-                  <input 
-                    type="email" 
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    className="w-full bg-brand-secondary border border-brand-border rounded-xl py-4 pl-12 pr-4 text-sm text-brand-text focus:outline-none focus:border-brand-primary/50 transition-all font-medium"
-                    placeholder="ejemplo@correo.com"
-                    required
-                  />
-                </div>
-              </div>
-              
-              <div className="space-y-2">
-                <label className="text-[10px] font-black uppercase text-brand-text/40 ml-1">Contraseña</label>
-                <div className="relative">
-                  <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-brand-text/30" />
-                  <input 
-                    type="password" 
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    className="w-full bg-brand-secondary border border-brand-border rounded-xl py-4 pl-12 pr-4 text-sm text-brand-text focus:outline-none focus:border-brand-primary/50 transition-all font-medium"
-                    placeholder="••••••••"
-                    required
-                  />
-                </div>
-              </div>
-
-              <button 
-                type="submit"
-                className="w-full bg-brand-primary text-white py-4 rounded-xl font-black uppercase text-[10px] tracking-widest shadow-lg shadow-brand-primary/20 hover:brightness-110 active:scale-95 transition-all"
-              >
-                {authMode === 'login' ? 'ENTRAR AL SISTEMA' : 'CREAR CUENTA'}
-              </button>
-
-              <div className="space-y-4">
-                <p className="text-center">
-                  <button 
-                    type="button"
-                    onClick={() => setAuthMode(authMode === 'login' ? 'register' : 'login')}
-                    className="text-[10px] font-black uppercase text-brand-primary hover:underline"
-                  >
-                    {authMode === 'login' ? '¿No tienes cuenta? Registrate aquí' : '¿Ya tienes cuenta? Inicia sesión'}
-                  </button>
-                </p>
-                {authMode === 'login' && (
-                  <p className="text-center">
-                    <button 
-                      type="button"
-                      onClick={handleResetPassword}
-                      className="text-[9px] font-bold uppercase text-brand-text/40 hover:text-brand-primary transition-colors"
-                    >
-                      ¿Olvidaste tu contraseña? Recuperar aquí
-                    </button>
-                  </p>
-                )}
-              </div>
-            </form>
-
-            <div className="relative py-2">
-              <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-brand-border"></div></div>
-              <div className="relative flex justify-center text-[8px] font-black uppercase text-brand-text/30 bg-brand-surface px-2">O continuar con</div>
+          <form onSubmit={loginWithEmail} className="space-y-4">
+            <div>
+              <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2 px-1">Correo Electrónico</label>
+              <input 
+                type="email"
+                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                className="w-full bg-brand-bg border border-brand-border p-4 rounded-xl font-bold text-brand-text focus:border-brand-primary outline-none transition-all"
+                placeholder="admin@ejemplo.com"
+              />
             </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              <button 
-                onClick={loginWithGoogle}
-                className="bg-white text-slate-900 py-4 rounded-xl font-black flex items-center justify-center gap-2 shadow-sm hover:bg-slate-50 active:scale-95 transition-all text-[9px] border border-slate-200"
-              >
-                <svg className="w-4 h-4" viewBox="0 0 24 24">
-                  <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
-                  <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
-                  <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" fill="#FBBC05"/>
-                  <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
-                </svg>
-                GOOGLE
-              </button>
-              
-              <button 
-                onClick={loginAnonymously}
-                className="bg-brand-secondary text-brand-text/70 py-4 rounded-xl font-black uppercase text-[9px] tracking-tight hover:bg-brand-secondary/80 active:scale-95 transition-all border border-brand-border"
-              >
-                INVITADO
-              </button>
+            <div>
+              <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2 px-1">Contraseña</label>
+              <input 
+                type="password"
+                required
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="w-full bg-brand-bg border border-brand-border p-4 rounded-xl font-bold text-brand-text focus:border-brand-primary outline-none transition-all"
+                placeholder="••••••••"
+              />
             </div>
+            
+            <button 
+              type="submit"
+              className="w-full bg-brand-primary text-white py-4 rounded-xl font-black uppercase text-[10px] tracking-widest shadow-xl shadow-brand-primary/20 hover:bg-brand-primary/90 active:scale-[0.98] transition-all"
+            >
+              {authMode === 'login' ? 'INICIAR SESIÓN' : 'REGISTRARSE'}
+            </button>
+          </form>
 
+          <div className="relative my-8">
+            <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-brand-border"></div></div>
+            <div className="relative flex justify-center text-[8px] font-black uppercase text-brand-text/30 bg-brand-surface px-2">O continuar con</div>
           </div>
 
-          {authError && (
-            <div className="mt-6 p-4 bg-brand-red/10 border border-brand-red/20 rounded-xl">
-              <p className="text-brand-red font-bold text-[10px] uppercase tracking-wide leading-relaxed text-center">
-                {authError}
-              </p>
-            </div>
-          )}
+          <button 
+            type="button"
+            onClick={loginWithGoogle}
+            className="w-full bg-white text-slate-900 py-4 rounded-xl font-black flex items-center justify-center gap-2 shadow-sm hover:bg-slate-50 active:scale-95 transition-all text-[9px] border border-slate-200"
+          >
+            <svg className="w-4 h-4" viewBox="0 0 24 24">
+              <path fill="#EA4335" d="M12 5.04c1.94 0 3.51.66 4.87 1.96l3.62-3.62C18.23 1.33 15.39 0 12 0 7.31 0 3.25 2.69 1.25 6.63l4.21 3.27c.99-2.95 3.75-5.13 6.54-5.13z"/>
+              <path fill="#4285F4" d="M23.49 12.27c0-.8-.07-1.57-.2-2.32H12v4.39h6.44c-.28 1.48-1.12 2.74-2.38 3.58l3.69 2.87c2.16-1.99 3.74-4.92 3.74-8.52z"/>
+              <path fill="#FBBC05" d="M5.46 12c0-.69.12-1.36.33-1.99l-4.22-3.27C.54 8.03 0 9.96 0 12c0 2.04.54 3.97 1.57 5.26l4.22-3.27c-.21-.63-.33-1.3-.33-1.99z"/>
+              <path fill="#34A853" d="M12 24c3.24 0 5.96-1.07 7.95-2.9l-3.69-2.87c-1.1.74-2.51 1.17-4.26 1.17-3.28 0-6.06-2.22-7.05-5.21l-4.21 3.27C3.25 21.31 7.31 24 12 24z"/>
+            </svg>
+            GOOGLE ACCOUNT
+          </button>
         </motion.div>
       </div>
     );
@@ -1155,7 +1505,7 @@ export default function App() {
 
   if (!isAuthenticated) {
     return (
-      <div className="min-h-screen bg-brand-bg flex items-center justify-center p-6 selection:bg-brand-primary/30">
+      <div className="min-h-screen bg-brand-bg flex items-center justify-center p-6 selection:bg-brand-primary/30 text-brand-text">
         <motion.div 
           initial={{ opacity: 0, scale: 0.95 }} 
           animate={{ opacity: 1, scale: 1 }}
@@ -1164,870 +1514,607 @@ export default function App() {
           <div className="bg-brand-secondary w-20 h-20 rounded-2xl flex items-center justify-center mx-auto mb-6 border border-brand-border">
             <Lock className="w-10 h-10 text-brand-primary" />
           </div>
-          <h1 className="text-3xl font-black text-brand-text mb-2 tracking-tight">PrestaFácil</h1>
-          <p className="text-brand-text/50 font-bold mb-8 uppercase text-[10px] tracking-widest">Sistema de Gestión</p>
-          <form onSubmit={handleLogin} className="space-y-4">
+          <h2 className="text-xl font-black mb-1 uppercase tracking-tight">Acceso Privado</h2>
+          <p className="text-[10px] font-black text-brand-text/30 uppercase tracking-[0.2em] mb-8">Ingresa tu código PIN</p>
+          
+          <form onSubmit={handleLogin} className="space-y-6">
             <input 
               type="password" 
-              placeholder="••••" 
-              value={pinInput} 
-              onChange={(e)=>setPinInput(e.target.value)} 
-              className="w-full border border-brand-border p-5 rounded-xl text-center text-4xl font-black tracking-[0.3em] outline-none focus:border-brand-primary/50 bg-brand-bg text-brand-text transition-all font-mono"
-              autoFocus 
+              value={pinInput}
+              onChange={(e) => setPinInput(e.target.value)}
+              maxLength={4}
+              placeholder="••••"
+              className="w-full text-center text-4xl font-black tracking-[1em] bg-brand-bg border border-brand-border p-6 rounded-2xl focus:border-brand-primary outline-none transition-all shadow-inner"
+              autoFocus
             />
-            <button type="submit" className="w-full bg-brand-primary text-white py-5 rounded-xl font-black uppercase text-xs shadow-lg hover:bg-brand-primary/80 active:scale-95 transition-all">
-              Desbloquear Acceso
+            <button 
+              type="submit"
+              className="w-full bg-brand-primary text-white py-5 rounded-xl font-black uppercase text-[10px] tracking-widest shadow-xl shadow-brand-primary/20 hover:bg-brand-primary/90 active:scale-[0.98] transition-all"
+            >
+              DESBLOQUEAR SISTEMA
             </button>
           </form>
-          {systemMessage && <p className="mt-4 text-brand-red font-bold text-xs uppercase animate-pulse">{systemMessage}</p>}
         </motion.div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-brand-bg text-brand-text pb-20 overflow-x-hidden selection:bg-brand-primary/20">
+    <div className="min-h-screen bg-brand-bg font-sans text-brand-text overflow-x-hidden">
       <Toaster position="top-right" richColors />
-      <style>{`
-        @media print {
-          nav, aside, .no-print { display: none !important; }
-          .print-only { display: block !important; }
-          .print-area { position: absolute; left: 0; top: 0; width: 100%; }
-        }
-      `}</style>
       
-      {/* Header */}
       <nav className="bg-brand-surface border-b border-brand-border px-6 py-4 flex justify-between items-center sticky top-0 z-40 shadow-sm no-print">
         <div className="flex items-center gap-3">
-          <div className="bg-brand-bg border border-brand-border p-2 rounded-xl">
-            <PiggyBank className="w-5 h-5 text-brand-primary" />
-          </div>
+          <div className="bg-brand-bg border border-brand-border p-2 rounded-xl"><PiggyBank className="w-5 h-5 text-brand-primary" /></div>
           <div>
             <span className="text-lg font-black tracking-tight text-brand-text">PRESTAFÁCIL</span>
-            <div className="flex items-center gap-1.5 -mt-1">
-              <div className={`w-1.5 h-1.5 rounded-full animate-pulse ${user ? 'bg-brand-green' : 'bg-brand-red'}`}></div>
-              <span className="text-[9px] font-bold text-brand-text/40 uppercase">
-                ESTADO: {authError ? 'ERROR' : (user ? 'CONECTADO' : 'CONECTANDO...')}
-              </span>
-            </div>
           </div>
         </div>
-        <div className="flex gap-2">
-          <button 
-            onClick={() => setIsDarkMode(!isDarkMode)} 
-            className="flex items-center justify-center bg-brand-secondary text-brand-text/70 border border-brand-border h-10 w-10 rounded-lg hover:bg-brand-secondary/80 transition-all shadow-sm"
-            title={isDarkMode ? 'Cambiar a Modo Claro' : 'Cambiar a Modo Oscuro'}
-          >
-            {isDarkMode ? <Sun className="w-5 h-5 text-brand-yellow" /> : <Moon className="w-5 h-5 text-brand-primary" />}
-          </button>
-          <button onClick={() => setShowMigrationModal(true)} className="hidden md:flex items-center gap-2 bg-brand-secondary text-brand-text/70 border border-brand-border px-4 py-2 rounded-lg text-[10px] font-black uppercase hover:bg-brand-secondary/80 transition-all">
-            <Cloud className="w-3.5 h-3.5" /> Respaldos
-          </button>
-          <button 
-            onClick={handleLogout} 
-            className="flex items-center justify-center bg-brand-secondary text-brand-red/70 border border-brand-border h-10 w-10 rounded-lg hover:bg-brand-red/10 transition-all shadow-sm"
-            title="Cerrar Sesión"
-          >
-            <LogOut className="w-5 h-5" />
-          </button>
+        <div className="flex items-center gap-4">
+          <button onClick={() => setIsDarkMode(!isDarkMode)} className="p-2 bg-brand-secondary rounded-lg">{isDarkMode ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}</button>
+          <button onClick={handleLogout} className="p-2 bg-brand-red/10 text-brand-red rounded-lg"><LogOut className="w-5 h-5" /></button>
         </div>
       </nav>
 
-      <main className="max-w-7xl mx-auto px-4 py-8 no-print">
-        {authError && (
-          <motion.div 
-            initial={{ opacity: 0, y: -20 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="mb-8 bg-brand-red p-6 rounded-2xl border border-brand-red/20 shadow-xl flex items-center gap-4"
-          >
-            <div className="bg-white/20 p-3 rounded-xl"><AlertCircle className="w-6 h-6 text-white" /></div>
-            <div className="flex-1">
-              <h3 className="text-white font-black uppercase text-sm tracking-tight">Problema de Conexión</h3>
-              <p className="text-white/80 text-[11px] font-bold mt-1 uppercase tracking-wider">{authError}</p>
-            </div>
-            <button 
-              onClick={() => window.location.reload()}
-              className="bg-white text-brand-red px-4 py-2 rounded-lg text-[10px] font-black uppercase shadow-lg active:scale-95 transition-all"
-            >
-              Reintentar
-            </button>
-          </motion.div>
-        )}
-        
-        {/* Dashboard Grid */}
+      <main className="p-4 md:p-8 max-w-7xl mx-auto pb-24">
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-          <motion.div 
-            whileHover={{ y: -2 }}
-            className="bg-[#0f172a] rounded-2xl p-6 relative overflow-hidden border border-white/5 shadow-xl"
-          >
-            <div className="flex justify-between items-center relative z-10 mb-2">
-              <p className="text-white/40 uppercase tracking-widest text-[9px] font-black">Caja Disponible</p>
-              <button 
-                onClick={() => setShowCashModal(true)} 
-                className="bg-white/10 backdrop-blur-md text-[10px] px-3 py-1 rounded-md text-white font-bold hover:bg-white/20 transition-colors border border-white/10"
-              >
-                GESTIONAR
-              </button>
-            </div>
-            <h2 className="text-4xl font-black text-white tracking-tighter font-mono">{formatMoney(totals.caja)}</h2>
-            <Wallet className="absolute -right-4 -bottom-4 w-24 h-24 text-white/5" />
-            <div className="absolute top-0 right-0 p-4 opacity-20">
-               <div className="bg-brand-primary w-2 h-2 rounded-full animate-ping"></div>
-            </div>
-          </motion.div>
-
-          <div className="bg-brand-surface rounded-2xl p-6 border border-brand-border flex items-center gap-4">
-            <div className="bg-brand-secondary/50 p-3 rounded-xl border border-brand-border"><TrendingUp className="w-6 h-6 text-brand-primary" /></div>
-            <div>
-              <p className="text-brand-text/40 text-[9px] font-black uppercase tracking-widest">En Calle</p>
-              <h2 className="text-xl font-black text-brand-text font-mono">{formatMoney(totals.calle)}</h2>
-            </div>
+          <div className="bg-brand-surface p-6 rounded-2xl border border-brand-border shadow-sm">
+             <p className="text-[10px] font-black text-brand-text/30 uppercase mb-1">Caja Disponible</p>
+             <h3 className="text-2xl font-black text-brand-text font-mono">{formatMoney(totals.caja)}</h3>
           </div>
-
-          <div className="bg-brand-surface rounded-2xl p-6 border border-brand-border flex items-center gap-4">
-            <div className="bg-brand-green/10 p-3 rounded-xl border border-brand-green/20"><div className="text-brand-green font-bold">$</div></div>
-            <div>
-              <p className="text-brand-text/40 text-[9px] font-black uppercase tracking-widest">Utilidad Proyectada</p>
-              <h2 className="text-xl font-black text-brand-green font-mono">{formatMoney(totals.ganancia)}</h2>
-            </div>
+          <div className="bg-brand-surface p-6 rounded-2xl border border-brand-border shadow-sm">
+             <p className="text-[10px] font-black text-brand-text/30 uppercase mb-1">Capital en Calle</p>
+             <h3 className="text-2xl font-black text-brand-text font-mono">{formatMoney(totals.calle)}</h3>
           </div>
-
-          <div className="bg-brand-surface rounded-2xl p-6 border border-brand-border flex items-center gap-4">
-            <div className="bg-brand-yellow/10 p-3 rounded-xl border border-brand-yellow/20"><ArrowDownRight className="w-6 h-6 text-brand-yellow" /></div>
-            <div>
-              <p className="text-brand-text/40 text-[9px] font-black uppercase tracking-widest">Cobrado Hoy</p>
-              <h2 className="text-xl font-black text-brand-text font-mono">{formatMoney(totals.recaudado)}</h2>
-            </div>
+          <div className="bg-brand-surface p-6 rounded-2xl border border-brand-border shadow-sm">
+             <p className="text-[10px] font-black text-brand-text/30 uppercase mb-1">Utilidad Real</p>
+             <h3 className="text-2xl font-black text-brand-green font-mono">{formatMoney(totals.ganancia)}</h3>
+          </div>
+          <div className="bg-brand-surface p-6 rounded-2xl border border-brand-border border-l-brand-primary border-l-4 shadow-sm cursor-pointer hover:bg-brand-bg transition-all" onClick={() => setShowCashModal(true)}>
+             <p className="text-[10px] font-black text-brand-primary uppercase mb-1 flex items-center gap-2"><Wallet className="w-3 h-3" /> Gestión de Caja</p>
+             <h3 className="text-sm font-black text-brand-text uppercase">Historial & Ajustes</h3>
           </div>
         </div>
 
-        {/* Search & Actions */}
         <div className="flex flex-col lg:flex-row justify-between items-center mb-8 gap-4">
-          <div className="flex items-center bg-brand-surface border border-brand-border rounded-xl px-4 py-2 w-full lg:max-w-md">
-            <Search className="w-4 h-4 text-brand-text/30 mr-2" />
+          <div className="relative w-full lg:max-w-md">
+            <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-brand-text/30" />
             <input 
               type="text" 
-              placeholder="Buscar por cliente..." 
-              className="bg-transparent border-none outline-none w-full text-sm font-bold text-brand-text placeholder:text-brand-text/20"
+              placeholder="Buscar cliente o teléfono..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
+              className="w-full bg-brand-surface border border-brand-border pl-12 pr-4 py-4 rounded-xl font-bold text-brand-text outline-none focus:border-brand-primary shadow-sm"
             />
           </div>
-          
           <div className="flex gap-2 w-full lg:w-auto">
-            <div className="bg-brand-surface p-1 rounded-xl border border-brand-border flex flex-1 lg:flex-none">
-              <button onClick={() => setActiveTab('activos')} className={`flex-1 lg:px-6 py-2 rounded-lg font-black text-[10px] uppercase transition-all ${activeTab === 'activos' ? 'bg-brand-primary text-white shadow-md' : 'text-brand-text/40 hover:text-brand-text/60'}`}>Activos</button>
-              <button onClick={() => setActiveTab('historial')} className={`flex-1 lg:px-6 py-2 rounded-lg font-black text-[10px] uppercase transition-all ${activeTab === 'historial' ? 'bg-brand-primary text-white shadow-md' : 'text-brand-text/40 hover:text-brand-text/60'}`}>Historial</button>
+            <div className="bg-brand-surface border border-brand-border p-1 rounded-xl flex items-center shadow-sm w-full lg:w-auto">
+               <button onClick={() => setActiveTab('activos')} className={
+                 `flex-1 lg:px-6 py-2 rounded-lg font-black text-[10px] uppercase transition-all ${
+                   activeTab === 'activos' ? 'bg-brand-primary text-white shadow-md' : 'text-brand-text/40 hover:text-brand-text/60'
+                 }`
+               }>Activos</button>
+               <button onClick={() => setActiveTab('historial')} className={
+                 `flex-1 lg:px-6 py-2 rounded-lg font-black text-[10px] uppercase transition-all ${
+                   activeTab === 'historial' ? 'bg-brand-primary text-white shadow-md' : 'text-brand-text/40 hover:text-brand-text/60'
+                 }`
+               }>Historial</button>
             </div>
-            <button onClick={() => setShowNewLoanModal(true)} className="bg-brand-primary text-white px-6 py-3 rounded-xl font-black text-[11px] uppercase tracking-wider flex items-center gap-2 hover:bg-brand-primary/80 transition-all active:scale-95 shadow-lg shadow-brand-primary/20">
+
+            {activeTab === 'historial' && pastLoans.length > 0 && (
+              <button 
+                onClick={handleClearPastLoans}
+                className="bg-brand-red/10 text-brand-red px-4 py-2 rounded-lg font-black text-[9px] uppercase hover:bg-brand-red hover:text-white transition-all flex items-center gap-1 border border-brand-red/20"
+              >
+                <Trash className="w-3 h-3" /> BORRAR CERRADOS
+              </button>
+            )}
+
+            <button onClick={() => setShowNewLoanModal(true)} className="bg-brand-primary text-white px-6 py-4 rounded-xl font-black text-[10px] uppercase tracking-widest flex items-center gap-2 shadow-xl shadow-brand-primary/20 hover:brightness-110 active:scale-95 transition-all">
               <Plus className="w-4 h-4" /> Nuevo Préstamo
             </button>
           </div>
         </div>
 
-        {/* Loans List */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          <AnimatePresence mode="popLayout">
+          <AnimatePresence>
             {filteredLoans.map((l) => (
               <motion.div 
-                layout
                 key={l.id}
-                initial={{ opacity: 0, y: 10 }}
+                layout
+                initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.95 }}
-                className="bg-brand-surface rounded-2xl border border-brand-border p-6 shadow-sm hover:border-brand-primary/30 transition-all relative overflow-hidden group"
+                exit={{ opacity: 0, scale: 0.9 }}
+                className="bg-brand-surface rounded-2xl p-6 border border-brand-border shadow-sm hover:shadow-md transition-all group relative overflow-hidden"
               >
-                <div className="flex justify-between items-start mb-4">
+                <div className="flex justify-between items-start mb-6">
                   <div>
-                    <h3 className="font-black text-xl text-brand-text group-hover:text-brand-primary transition-colors uppercase tracking-tight truncate max-w-[200px]">
-                      {l.client}
-                    </h3>
-                    <div className="flex items-center text-brand-text/30 text-[10px] font-bold mt-1">
-                      <Calendar className="w-3 h-3 mr-1" /> DESDE {l.date}
-                    </div>
+                    <h3 className="text-lg font-black text-brand-text uppercase tracking-tight truncate max-w-[200px]">{l.client}</h3>
+                    <p className="text-[9px] font-bold text-brand-text/30 uppercase flex items-center gap-1"><Calendar className="w-3 h-3" /> {l.date}</p>
                   </div>
-                  <div className={`px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest border ${
-                    l.status === 'ACTIVO' ? 'bg-brand-primary/10 text-brand-primary border-brand-primary/20' : 
-                    l.status === 'PAGADO' ? 'bg-brand-green/10 text-brand-green border-brand-green/20' : 
-                    'bg-brand-secondary text-brand-text/30 border-brand-border'
-                  }`}>
-                    {l.status}
-                  </div>
-                </div>
-
-                <div className="mb-6">
-                  <div className="flex justify-between text-[10px] font-black text-brand-text/30 uppercase mb-2">
-                    <span>Progreso</span>
-                    <span className="text-brand-text">{l.progress}%</span>
-                  </div>
-                  <div className="h-1.5 bg-brand-bg rounded-full overflow-hidden border border-brand-border">
-                    <motion.div 
-                      initial={{ width: 0 }}
-                      animate={{ width: `${l.progress}%` }}
-                      className={`h-full ${l.status === 'ACTIVO' ? 'bg-brand-primary' : 'bg-brand-green'}`}
-                    />
-                  </div>
-                </div>
-
-                  <div className="flex justify-between items-end mb-6">
-                  <div>
-                    <p className="text-[9px] font-black text-brand-text/30 uppercase tracking-widest mb-1">Inversión</p>
-                    <p className="font-bold text-brand-text/70 font-mono">{formatMoney(l.principal)}</p>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-[9px] font-black text-brand-text/30 uppercase tracking-widest mb-1">Prox. Pago</p>
-                    <p className="font-bold text-brand-primary text-[10px] uppercase">{calculateSchedule(l).find(s => s.status === 'PENDIENTE')?.date || 'Finalizado'}</p>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-[9px] font-black text-brand-text/30 uppercase tracking-widest mb-1">Saldo Pendiente</p>
-                    <p className="text-2xl font-black text-brand-text tracking-tight font-mono">{formatMoney(l.remaining)}</p>
-                  </div>
-                </div>
-
-                <div className="flex flex-wrap gap-2 pt-5 border-t border-brand-border">
-                  <button 
-                    onClick={() => { setCurrentLoan(l); setPaymentAmount(''); setShowPaymentModal(true); }}
-                    className="flex-1 min-w-[120px] bg-brand-primary text-white py-3 rounded-xl font-black text-[10px] uppercase hover:bg-brand-primary/80 transition-all shadow-md active:scale-95"
-                  >
-                    COBRAR
-                  </button>
-                  <div className="flex gap-2 w-full sm:w-auto">
+                  <div className="flex gap-2 items-center">
                     <button 
-                      onClick={() => { setCurrentLoan(l); setShowScheduleModal(true); }}
-                      className="flex-1 sm:flex-none flex flex-col items-center justify-center gap-1 bg-brand-secondary text-brand-text/50 p-2 md:p-3 rounded-xl hover:bg-brand-secondary/80 transition-all border border-brand-border"
-                      title="Plan de Pagos"
-                    >
-                      <ListChecks className="w-4 h-4 md:w-5 md:h-5" />
-                      <span className="text-[7px] font-black uppercase md:hidden">Plan</span>
-                    </button>
-                    <button 
-                      onClick={() => { setCurrentLoan(l); setShowContractModal(true); }}
-                      className="flex-1 sm:flex-none flex flex-col items-center justify-center gap-1 bg-brand-secondary text-brand-text/50 p-2 md:p-3 rounded-xl hover:bg-brand-secondary/80 transition-all border border-brand-border"
-                      title="Contrato"
-                    >
-                      <FileText className="w-4 h-4 md:w-5 md:h-5" />
-                      <span className="text-[7px] font-black uppercase md:hidden">Doc</span>
-                    </button>
-                    <button 
-                      onClick={() => { 
-                        setCurrentLoan(l); 
+                      onClick={() => {
                         setEditForm({
                           client: l.client,
                           phone: l.phone,
-                          idNumber: l.idNumber || '',
-                          address: l.address || '',
-                          workplace: l.workplace || '',
-                          debt: String(l.debt),
-                          remaining: String(l.remaining),
+                          idNumber: l.idNumber || "",
+                          address: l.address || "",
+                          workplace: l.workplace || "",
+                          remaining: l.remaining.toString(),
+                          fixedQuota: l.fixedQuota ? l.fixedQuota.toString() : "",
                           status: l.status
                         });
-                        setShowEditModal(true); 
+                        setCurrentLoan(l);
+                        setShowEditModal(true);
                       }}
-                      className="flex-1 sm:flex-none flex flex-col items-center justify-center gap-1 bg-brand-primary/10 text-brand-primary p-2 md:p-3 rounded-xl hover:bg-brand-primary/20 transition-all border border-brand-primary/20"
-                      title="Editar Cliente"
+                      className="p-2 bg-brand-bg text-brand-text/30 hover:text-brand-primary rounded-lg transition-all"
                     >
-                      <Edit className="w-4 h-4 md:w-5 md:h-5" />
-                      <span className="text-[7px] font-black uppercase md:hidden">Editar</span>
+                      <Edit className="w-4 h-4" />
                     </button>
-                    <button 
-                      onClick={() => { setCurrentLoan(l); setRenewForm({ capital: '', calcMethod: 'interes', interestRate: '', fixedQuota: '', installments: '' }); setShowRenewModal(true); }}
-                      className="flex-1 sm:flex-none flex flex-col items-center justify-center gap-1 bg-brand-yellow/10 text-brand-yellow p-2 md:p-3 rounded-xl hover:bg-brand-yellow/20 transition-all border border-brand-yellow/20"
-                      title="Renovar Préstamo"
-                    >
-                      <ArrowUpRight className="w-4 h-4 md:w-5 md:h-5" />
-                      <span className="text-[7px] font-black uppercase md:hidden">Renov</span>
-                    </button>
-                    <button 
-                      onClick={async () => { if(confirm("¿Eliminar registro permanentemente?")) await deleteDoc(doc(db, 'artifacts', APP_DATA_PREFIX, 'users', user?.uid || '', 'loans', l.id)); }}
-                      className="flex-1 sm:flex-none flex flex-col items-center justify-center gap-1 bg-brand-red/10 text-brand-red p-2 md:p-3 rounded-xl hover:bg-brand-red/20 transition-all border border-brand-red/20"
-                      title="Eliminar"
-                    >
-                      <Trash2 className="w-4 h-4 md:w-5 md:h-5" />
-                      <span className="text-[7px] font-black uppercase md:hidden">Borrar</span>
-                    </button>
+                    <div className={`px-3 py-1 rounded-full text-[8px] font-black uppercase ${l.status === 'ACTIVO' ? 'bg-brand-green/10 text-brand-green border border-brand-green/20' : 'bg-brand-red/10 text-brand-red border border-brand-red/20'}`}>
+                      {l.status}
+                    </div>
                   </div>
+                </div>
+
+                <div className="space-y-4 mb-6">
+                   <div className="flex justify-between items-end">
+                      <div>
+                        <p className="text-[9px] font-black text-brand-text/30 uppercase">Saldo Pendiente</p>
+                        <p className="text-2xl font-black text-brand-text font-mono">{formatMoney(l.remaining)}</p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-[9px] font-black text-brand-text/30 uppercase">Cuota</p>
+                        <p className="text-sm font-black text-brand-primary">{formatMoney(l.fixedQuota || (l.debt / l.installments))}</p>
+                      </div>
+                   </div>
+
+                   <div className="relative h-2 bg-brand-bg rounded-full overflow-hidden">
+                      <motion.div 
+                        initial={{ width: 0 }}
+                        animate={{ width: `${l.progress}%` }}
+                        className="absolute top-0 left-0 h-full bg-brand-primary" 
+                      />
+                   </div>
+                   <p className="text-right text-[8px] font-black text-brand-text/20 uppercase tracking-widest">{l.progress}% Pagado</p>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                   <button 
+                    onClick={() => { setCurrentLoan(l); setShowPaymentModal(true); } }
+                    className="bg-brand-primary text-white py-3 rounded-xl font-black text-[9px] uppercase shadow-lg shadow-brand-primary/20 hover:brightness-110 transition-all"
+                   >RECAUDAR</button>
+                  <button 
+                    onClick={() => { setCurrentLoan(l); setShowScheduleModal(true); } }
+                    className="bg-brand-secondary text-brand-text/60 py-3 rounded-xl font-black text-[9px] border border-brand-border uppercase hover:bg-brand-secondary/80 transition-all"
+                   >PLAN DE PAGOS</button>
+                  <button 
+                    onClick={() => { setCurrentLoan(l); setShowContractModal(true); } }
+                    className="bg-brand-primary text-white py-3 rounded-xl font-black text-[9px] border border-brand-primary uppercase hover:brightness-110 transition-all font-mono shadow-lg shadow-brand-primary/20"
+                   >IMPRIMIR CONTRATO</button>
+                   <button 
+                    onClick={() => { setShowCashModal(true); setSearchTerm(l.client); } }
+                    className="col-span-2 bg-brand-bg text-brand-text/30 py-3 rounded-xl font-black text-[9px] border border-brand-border border-dashed uppercase hover:text-brand-primary hover:border-brand-primary transition-all mt-2"
+                   >VER HISTORIAL DE PAGOS</button>
                 </div>
               </motion.div>
             ))}
           </AnimatePresence>
         </div>
+        
+        {/* Footer info/stats links */}
+        <div className="mt-12 flex flex-wrap justify-center gap-6">
+           <button onClick={() => setShowGrowthModal(true)} className="flex items-center gap-2 text-[10px] font-black text-brand-text/30 uppercase hover:text-brand-primary transition-colors">
+              <TrendingUp className="w-4 h-4" /> Estadísticas de Crecimiento
+           </button>
+           <button onClick={() => setShowMigrationModal(true)} className="flex items-center gap-2 text-[10px] font-black text-brand-text/30 uppercase hover:text-brand-red transition-colors">
+              <Database className="w-4 h-4" /> Respaldo / Migración
+           </button>
+        </div>
       </main>
 
-      {/* Modals Container */}
       <AnimatePresence>
-        {/* Modal Pago */}
+        {/* Modal Recaudar */}
         {showPaymentModal && currentLoan && (
-          <div className="fixed inset-0 bg-brand-bg/95 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
+          <div className="fixed inset-0 bg-brand-bg/95 z-50 flex items-center justify-center p-0 md:p-4 backdrop-blur-md printable-area">
             <motion.div 
-              initial={{ opacity: 0, scale: 0.98, y: 10 }}
+              initial={{ opacity: 0, scale: 0.98, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="bg-brand-surface rounded-2xl w-full max-w-sm p-8 border border-brand-border shadow-2xl relative overflow-hidden"
+              exit={{ opacity: 0, scale: 0.95, y: 10 }}
+              className="bg-brand-surface w-full h-full md:h-auto md:max-w-md md:rounded-2xl shadow-2xl overflow-hidden flex flex-col border border-brand-border"
             >
-              <button onClick={closeAllModals} className="absolute top-6 right-6 text-brand-text-muted hover:text-brand-text">
-                <X className="w-6 h-6" />
-              </button>
-              
-              <div className="text-center mb-8">
-                <h3 className="text-[10px] font-black text-brand-text-muted uppercase tracking-widest mb-2">REGISTRAR ENTRADA</h3>
-                <h2 className="text-2xl font-black text-brand-text truncate px-4">{currentLoan.client}</h2>
+              <div className="p-6 md:p-8 border-b border-brand-border flex justify-between items-center bg-gradient-to-r from-brand-surface to-brand-bg">
+                <div>
+                   <h2 className="text-xl font-black text-brand-text uppercase tracking-tight">REGISTRAR RECAUDO</h2>
+                   <p className="text-[10px] font-black text-brand-text/30 uppercase tracking-widest">{currentLoan.client}</p>
+                </div>
+                <button onClick={(e) => closeAllModals(e)} className="text-brand-text/20 hover:text-brand-text p-2"><X className="w-6 h-6" /></button>
               </div>
 
-              <div className="bg-brand-bg rounded-2xl p-6 mb-8 border border-brand-border shadow-inner">
-                <div className="flex justify-between items-center mb-1 px-4">
-                   <p className="text-[9px] font-black text-brand-text-muted uppercase tracking-widest">Deuda Actual</p>
-                   <ArrowDownRight className="w-3 h-3 text-brand-red" />
+              <div className="p-6 md:p-8 space-y-6 flex-1 overflow-y-auto">
+                <div className="bg-brand-bg/50 p-6 rounded-2xl border border-brand-border text-center shadow-inner">
+                  <p className="text-[10px] font-black text-brand-text/30 uppercase mb-2 tracking-widest">Saldo Pendiente Actual</p>
+                  <h3 className="text-4xl font-black text-brand-text font-mono tracking-tighter">{formatMoney(currentLoan.remaining)}</h3>
                 </div>
-                <p className="text-4xl font-black text-brand-text text-center tracking-tighter font-mono">{formatMoney(currentLoan.remaining)}</p>
-              </div>
 
-              <div className="space-y-6">
-                <div className="relative">
-                  <input 
-                    type="number" 
-                    step="any"
-                    value={paymentAmount}
-                    onChange={(e) => setPaymentAmount(e.target.value)}
-                    className="w-full bg-brand-bg text-brand-primary rounded-xl py-6 px-10 text-4xl font-black text-center outline-none border border-brand-border focus:border-brand-primary/50 placeholder:text-brand-text-dim font-mono shadow-inner" 
-                    placeholder="0.00"
-                    autoFocus
-                  />
-                  <div className="absolute left-6 top-1/2 -translate-y-1/2 text-brand-text-muted font-black text-xl">$</div>
-                </div>
-                
-                <button 
-                  onClick={handleProcessPayment}
-                  disabled={isSubmitting}
-                  className={`w-full bg-brand-primary text-white py-5 rounded-xl font-black uppercase text-[10px] tracking-widest shadow-lg shadow-brand-primary/20 transition-all ${isSubmitting ? 'opacity-50' : 'hover:bg-brand-primary/80 active:scale-[0.98]'}`}
-                >
-                  {isSubmitting ? 'PROCESANDO...' : 'PROCESAR COBRO'}
-                </button>
-                {formError && (
-                  <div className="bg-brand-red/10 border border-brand-red/20 p-4 rounded-xl flex items-center gap-3">
-                    <AlertCircle className="w-5 h-5 text-brand-red shrink-0" />
-                    <p className="text-[10px] font-black text-brand-red uppercase tracking-tight">{formError}</p>
+                <form onSubmit={handleProcessPayment} className="space-y-4 px-1">
+                  <div>
+                    <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2 px-1">Monto a Recaudar ($)</label>
+                    <input 
+                      type="number"
+                      autoFocus
+                      step="any"
+                      value={paymentAmount}
+                      onChange={(e) => setPaymentAmount(e.target.value)}
+                      className="w-full bg-brand-bg border border-brand-border p-5 rounded-2xl font-black text-2xl text-brand-text focus:border-brand-primary outline-none transition-all shadow-inner font-mono"
+                      placeholder="0.00"
+                    />
                   </div>
-                )}
+
+                  <div className="grid grid-cols-2 gap-3">
+                     {[500, 1000, 2000, 5000].map(amt => (
+                       <button 
+                        key={amt}
+                        type="button"
+                        onClick={() => setPaymentAmount(amt.toString())}
+                        className="py-3 bg-brand-bg border border-brand-border rounded-xl text-[10px] font-black text-brand-text/40 hover:bg-brand-primary hover:text-white hover:border-brand-primary transition-all uppercase"
+                       >+{amt}</button>
+                     ))}
+                  </div>
+
+                  {currentLoan.remaining > 0 && (
+                     <button 
+                      type="button"
+                      onClick={() => setPaymentAmount(currentLoan.remaining.toString())}
+                      className="w-full py-3 bg-brand-primary/10 text-brand-primary border border-brand-primary/20 rounded-xl text-[10px] font-black uppercase hover:bg-brand-primary hover:text-white transition-all shadow-sm"
+                     >SALDAR TOTAL: {formatMoney(currentLoan.remaining)}</button>
+                  )}
+
+                  <div className="pt-4">
+                    <button 
+                      type="submit"
+                      disabled={isSubmitting || !paymentAmount}
+                      className="w-full bg-brand-primary text-white py-5 rounded-2xl font-black uppercase text-[12px] tracking-widest shadow-2xl shadow-brand-primary/30 hover:bg-brand-primary/90 active:scale-[0.98] transition-all disabled:opacity-50"
+                    >
+                      {isSubmitting ? 'PROCESANDO...' : 'CONFIRMAR PAGO'}
+                    </button>
+                    {formError && <p className="mt-3 text-brand-red text-[9px] font-black uppercase text-center">{formError}</p>}
+                  </div>
+                </form>
               </div>
             </motion.div>
           </div>
         )}
+      </AnimatePresence>
 
-        {/* Receipt Modal */}
+      <AnimatePresence>
+        {/* Modal Recibo Digital */}
         {showReceiptModal && currentLoan && (
-          <div className="fixed inset-0 bg-brand-bg/95 z-[60] flex flex-col items-center justify-center p-4 backdrop-blur-md overflow-y-auto">
-             <motion.div 
-               initial={{ opacity: 0, scale: 0.9 }}
-               animate={{ opacity: 1, scale: 1 }}
-               className="w-full max-w-sm my-auto" 
-               id="receipt-content"
-             >
-                <div className="text-center p-6 md:p-10 border border-brand-border mb-6 bg-brand-surface rounded-2xl shadow-xl relative overflow-hidden">
-                  <div className="absolute top-0 left-0 w-full h-1 bg-brand-primary"></div>
-                  <h1 className="text-2xl font-black mb-1 text-brand-text tracking-tighter">PRESTAFÁCIL</h1>
-                  <p className="text-[9px] font-bold text-brand-text-muted tracking-widest uppercase mb-6 md:mb-10">COMPROBANTE DE PAGO</p>
-                  
-                  <div className="bg-brand-bg rounded-2xl p-4 md:p-6 border border-brand-border mb-6 md:mb-8 shadow-inner">
-                    <p className="text-[9px] font-black text-brand-text-muted uppercase tracking-widest mb-1">Total Recibido</p>
-                    <h2 className="text-4xl md:text-5xl font-black text-brand-primary tracking-tighter font-mono">{formatMoney(Number(paymentAmount))}</h2>
-                  </div>
+          <div className="fixed inset-0 bg-brand-bg/98 z-[60] flex items-center justify-center p-0 md:p-4 backdrop-blur-xl printable-area">
+            <motion.div 
+              id="receipt-pdf-content"
+              initial={{ opacity: 0, scale: 0.9, y: 50 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 50 }}
+              className="bg-white text-slate-900 w-full h-full md:h-auto md:max-w-sm md:rounded-[2.5rem] shadow-[0_0_100px_rgba(0,0,0,0.5)] overflow-hidden flex flex-col relative print:shadow-none print:border-none"
+            >
+              <button onClick={(e) => closeAllModals(e)} className="absolute top-8 right-8 text-slate-300 hover:text-brand-primary transition-all p-2 z-10 no-print"><X className="w-8 h-8" /></button>
+              
+              <div className="p-8 pb-4 text-center">
+                 <div className="w-20 h-20 bg-brand-primary/10 rounded-full flex items-center justify-center mx-auto mb-6">
+                    <CheckCircle2 className="w-10 h-10 text-brand-primary" />
+                 </div>
+                 <h2 className="text-2xl font-black tracking-tight text-slate-900 uppercase">PAGO EXITOSO</h2>
+                 <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mt-1">Transacción procesada correctamente</p>
+              </div>
 
-                  <div className="space-y-3 md:space-y-4 text-left">
-                    <div className="flex justify-between border-b border-brand-border pb-2">
-                       <span className="text-[10px] font-bold text-brand-text-muted uppercase">Cliente</span>
-                       <span className="text-[10px] font-black uppercase text-brand-text truncate ml-4 text-right flex-1">{currentLoan.client}</span>
+              <div className="p-10 space-y-6 flex-1 overflow-y-auto">
+                 <div className="border-y-2 border-slate-100 py-8 space-y-4">
+                    <div className="flex justify-between items-center text-[10px] font-black uppercase text-slate-400 tracking-widest">
+                       <span>CLIENTE</span>
+                       <span className="text-slate-900 font-bold">{currentLoan.client}</span>
                     </div>
-                    <div className="flex justify-between border-b border-brand-border pb-2">
-                       <span className="text-[10px] font-bold text-brand-text-muted uppercase">Fecha</span>
-                       <span className="text-[10px] font-black uppercase text-brand-text">{receiptDate || new Date().toLocaleDateString()}</span>
+                    <div className="flex justify-between items-center text-[10px] font-black uppercase text-slate-400 tracking-widest">
+                       <span>FORMA DE PAGO</span>
+                       <span className="text-slate-900 font-bold">EFECTIVO / CAJA</span>
                     </div>
-                    <div className="flex justify-between border-b border-brand-border pb-2">
-                       <span className="text-[10px] font-bold text-brand-text-muted uppercase">Pago Recibido</span>
-                       <span className="text-[10px] font-black uppercase text-brand-text font-mono">{formatMoney(Number(paymentAmount))}</span>
+                    <div className="flex justify-between items-center text-[10px] font-black uppercase text-slate-400 tracking-widest">
+                       <span>FECHA</span>
+                       <span className="text-slate-900 font-bold">{receiptDate}</span>
                     </div>
-                    <div className="flex justify-between">
-                       <span className="text-[10px] font-bold text-brand-text-muted uppercase">Saldo Pendiente</span>
-                       <span className="text-[10px] font-black uppercase text-brand-red font-mono">
-                         {formatMoney(currentLoan.remaining)}
-                       </span>
-                    </div>
-                  </div>
-                </div>
+                 </div>
 
-                <div className="flex flex-col gap-2 md:gap-3 no-print mb-10">
-                    <button 
-                     onClick={handleDownloadReceiptPDF}
-                     disabled={isSubmitting}
-                     className={`w-full bg-brand-primary text-white py-4 md:py-5 rounded-xl font-black text-[10px] uppercase flex items-center justify-center gap-2 shadow-lg shadow-brand-primary/20 transition-all ${isSubmitting ? 'opacity-50' : 'active:scale-95'}`}
-                    >
-                      {isSubmitting ? 'GENERANDO...' : <><Download className="w-5 h-5" /> DESCARGAR RECIBO PDF</>}
-                    </button>
-                    <button 
-                     onClick={() => {
-                       const text = `🧾 *RECIBO DE PAGO - PRESTAFÁCIL*%0A👤 *Cliente:* ${currentLoan.client}%0A💵 *Monto:* ${formatMoney(Number(paymentAmount))}%0A📉 *Saldo:* ${formatMoney(currentLoan.remaining)}%0A📅 *Fecha:* ${receiptDate || new Date().toLocaleDateString()}%0A✅ _Gracias por su cumplimiento._`;
-                       window.open(`https://wa.me/1${currentLoan.phone.replace(/\D/g, '')}?text=${text}`, '_blank');
-                     }}
-                     className="w-full bg-[#25D366] text-white py-3 md:py-4 rounded-xl font-black text-[10px] uppercase flex items-center justify-center gap-2 shadow-lg shadow-[#25D366]/20 transition-all active:scale-95"
-                    >
-                      <MessageCircle className="w-4 h-4" /> WHATSAPP
-                    </button>
-                   <button 
-                    onClick={() => {
-                      const nextPay = calculateSchedule(currentLoan).find(s => s.status === 'PENDIENTE');
-                      const text = nextPay 
-                        ? `🔔 *RECORDATORIO DE PAGO - PRESTAFÁCIL*%0A👤 *Hola ${currentLoan.client},*%0A%0A_Le recordamos su próximo compromiso de pago:_%0A%0A📅 *Fecha:* ${nextPay.date}%0A💵 *Monto:* ${formatMoney(nextPay.amount)}%0A📉 *Saldo Actual:* ${formatMoney(currentLoan.remaining)}%0A%0A🤝 _Agradecemos su puntualidad._`
-                        : `✅ *PRESTAFÁCIL - ESTADO DE CUENTA*%0A👤 *Hola ${currentLoan.client},*%0A%0A_Su préstamo ha sido completado con éxito._%0A📉 *Saldo Actual:* ${formatMoney(currentLoan.remaining)}`;
-                      window.open(`https://wa.me/1${currentLoan.phone.replace(/\D/g, '')}?text=${text}`, '_blank');
-                    }}
-                    className="w-full bg-brand-secondary text-brand-text/70 py-3 md:py-4 rounded-xl font-black text-[10px] uppercase flex items-center justify-center gap-2 border border-brand-border transition-all active:scale-95"
-                   >
-                     <Calendar className="w-4 h-4" /> COMPARTIR SALDO/PRÓXIMO PAGO
-                   </button>
-                   <button onClick={closeAllModals} className="w-full bg-brand-secondary text-brand-text/70 py-4 md:py-5 rounded-xl font-black text-[10px] uppercase border border-brand-border transition-all active:scale-95">
-                     CERRAR
-                   </button>
-                </div>
-             </motion.div>
+                 <div className="bg-slate-50 p-8 rounded-3xl text-center space-y-2">
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">MONTO PAGADO</p>
+                    <h3 className="text-5xl font-black text-brand-primary tracking-tighter">{formatMoney(lastPaidAmount)}</h3>
+                 </div>
+
+                 <div className="text-center bg-brand-primary/5 p-6 rounded-2xl border border-brand-primary/10">
+                    <p className="text-[9px] font-black text-slate-400 uppercase tracking-[0.2em] mb-1">SALDO RESTANTE</p>
+                    <p className="text-xl font-black text-brand-primary">{formatMoney(currentLoan.remaining)}</p>
+                 </div>
+              </div>
+
+              <div className="p-10 flex flex-col gap-3 no-print">
+                 <button onClick={() => handleDownloadPDF('receipt-pdf-content', `Recibo_${currentLoan.client.replace(/\s+/g, '_')}_${new Date().getTime()}`)} className="w-full bg-slate-900 text-white py-5 rounded-2xl font-black uppercase text-[10px] tracking-widest flex items-center justify-center gap-2 hover:bg-black transition-all">
+                    <Download className="w-4 h-4" /> DESCARGAR COMPROBANTE PDF
+                 </button>
+                 <button onClick={(e) => closeAllModals(e)} className="w-full bg-slate-100 text-slate-400 py-5 rounded-2xl font-black uppercase text-[10px] tracking-widest hover:bg-slate-200 hover:text-slate-600 transition-all">
+                    CERRAR VENTANA
+                 </button>
+              </div>
+            </motion.div>
           </div>
         )}
+      </AnimatePresence>
 
+      <AnimatePresence>
+        {/* Modal Plan de Pagos */}
+        {showScheduleModal && currentLoan && (
+          <div className="fixed inset-0 bg-brand-bg/95 z-50 flex items-center justify-center p-0 md:p-4 backdrop-blur-md printable-area">
+            <motion.div 
+              id="schedule-pdf-content"
+              initial={{ opacity: 0, scale: 0.98, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.98, y: 20 }}
+              className="bg-brand-surface w-full h-full md:h-auto md:max-w-2xl md:rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[100vh] md:max-h-[85vh] border border-brand-border"
+            >
+              <div className="p-6 md:p-8 border-b border-brand-border flex justify-between items-center bg-gradient-to-r from-brand-surface to-brand-bg sticky top-0 z-20">
+                <div className="flex items-center gap-4">
+                  <div className="bg-brand-primary/10 p-3 rounded-2xl border border-brand-primary/20">
+                    <ListChecks className="w-6 h-6 text-brand-primary" />
+                  </div>
+                  <div>
+                    <h2 className="text-xl font-black text-brand-text uppercase tracking-tight">Plan de Pagos</h2>
+                    <p className="text-[10px] font-black text-brand-text/30 uppercase tracking-widest">{currentLoan.client}</p>
+                  </div>
+                </div>
+                <div className="flex gap-2 no-print">
+                   <button onClick={() => handleDownloadPDF('schedule-pdf-content', `Plan_Pagos_${currentLoan.client.replace(/\s+/g, '_')}`)} className="px-6 py-3 bg-brand-primary text-white rounded-xl font-black text-[10px] uppercase flex items-center gap-2 shadow-lg shadow-brand-primary/20 hover:brightness-110 transition-all">
+                     <Download className="w-4 h-4" /> DESCARGAR PLAN PDF
+                   </button>
+                   <button onClick={(e) => closeAllModals(e)} className="p-3 text-brand-text/20 hover:text-brand-text transition-transform hover:scale-110"><X className="w-6 h-6" /></button>
+                </div>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-2 md:p-8 space-y-6 bg-brand-bg/30">
+                {/* Visualización para impresión */}
+                <div className="hidden print:block mb-8 border-b-2 border-slate-900 pb-4">
+                  <h1 className="text-2xl font-black uppercase tracking-tighter text-slate-900">Plan de Pagos</h1>
+                  <div className="flex justify-between mt-4 text-[10px] font-bold uppercase text-slate-500">
+                    <div>
+                      <p>CLIENTE: <span className="text-slate-900">{currentLoan.client}</span></p>
+                      <p>TELÉFONO: <span className="text-slate-900">{currentLoan.phone}</span></p>
+                    </div>
+                    <div className="text-right">
+                      <p>FECHA: <span className="text-slate-900">{new Date().toLocaleDateString()}</span></p>
+                      <p>ESTADO: <span className="text-slate-900">{currentLoan.status}</span></p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-brand-surface rounded-2xl border border-brand-border overflow-x-auto shadow-sm">
+                  <table className="w-full text-left border-collapse min-w-[500px]">
+                    <thead>
+                      <tr className="bg-brand-bg/50 border-b border-brand-border">
+                        <th className="px-6 py-4 text-[9px] font-black text-brand-text/30 uppercase tracking-widest">Cuota</th>
+                        <th className="px-6 py-4 text-[9px] font-black text-brand-text/30 uppercase tracking-widest">Vence</th>
+                        <th className="px-6 py-4 text-[9px] font-black text-brand-text/30 uppercase tracking-widest text-right">Monto</th>
+                        <th className="px-6 py-4 text-[9px] font-black text-brand-text/30 uppercase tracking-widest text-center">Estado</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-brand-border/50">
+                      {calculateSchedule(currentLoan).map((s) => (
+                        <tr key={s.num} className="hover:bg-brand-bg/30 transition-colors group">
+                          <td className="px-6 py-4 font-black text-xs text-brand-text/40">#{s.num}</td>
+                          <td className="px-6 py-4 font-bold text-xs text-brand-text/60">{s.date}</td>
+                  <td className="px-6 py-4 font-black text-sm font-mono text-right text-brand-text/80">
+                    <div className="flex flex-col items-end">
+                      <span>{formatMoney(s.amountDue > 0 && s.amountDue < s.amount ? s.amountDue : s.amount)}</span>
+                      {s.amountDue > 0 && s.amountDue < s.amount && <span className="text-[10px] text-brand-primary">PENDIENTE</span>}
+                      {s.mora > 0 && <span className="text-[8px] text-brand-red">+{formatMoney(s.mora)} MORA</span>}
+                    </div>
+                  </td>
+                          <td className="px-6 py-4">
+                            <div className="flex justify-center items-center gap-2">
+                               {s.status === 'PAGADO' ? (
+                                 <div className="bg-brand-green/10 text-brand-green px-3 py-1 rounded-full text-[8px] font-black uppercase border border-brand-green/20 flex items-center gap-1">
+                                   <Check className="w-3 h-3" /> PAGADO
+                                 </div>
+                               ) : s.status === 'MORA' ? (
+                                 <div className="bg-brand-red/10 text-brand-red px-3 py-1 rounded-full text-[8px] font-black uppercase border border-brand-red/20 flex items-center gap-1">
+                                   <AlertCircle className="w-3 h-3" /> {formatMoney(s.mora)} MORA
+                                 </div>
+                               ) : (
+                                 <div className="bg-brand-text/5 text-brand-text/30 px-3 py-1 rounded-full text-[8px] font-black uppercase border border-brand-border flex items-center gap-1">
+                                   <History className="w-3 h-3" /> PENDIENTE
+                                 </div>
+                               )}
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
         {/* Modal Nuevo Préstamo */}
         {showNewLoanModal && (
-          <div className="fixed inset-0 bg-brand-bg/95 z-50 flex items-center justify-center p-4 backdrop-blur-sm overflow-y-auto pt-20 pb-20">
+          <div className="fixed inset-0 bg-brand-bg/95 z-50 flex items-center justify-center p-0 md:p-4 backdrop-blur-md overflow-y-auto">
             <motion.div 
-              initial={{ opacity: 0, y: 30 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="bg-brand-surface rounded-2xl w-full max-w-2xl shadow-2xl p-10 relative border border-brand-border"
+              initial={{ opacity: 0, scale: 0.98, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.98, y: 20 }}
+              className="bg-brand-surface w-full h-full md:h-auto md:max-w-2xl md:rounded-3xl shadow-2xl overflow-hidden flex flex-col border border-brand-border"
             >
-              <button onClick={closeAllModals} className="absolute top-8 right-8 text-brand-text/20 hover:text-brand-text">
-                <X className="w-6 h-6" />
-              </button>
-              
-              <h2 className="text-2xl font-black text-brand-text mb-8 tracking-tight uppercase">DATOS DEL PRÉSTAMO</h2>
-              
-              <datalist id="clients-list">{uniqueClients.map(c => <option key={c.id} value={c.client} />)}</datalist>
-
-              <form onSubmit={handleSaveNewLoan} className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="md:col-span-2">
-                  <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2">Nombre del Cliente</label>
-                  <input 
-                    list="clients-list"
-                    required 
-                    value={newLoanForm.client}
-                    onChange={(e) => handleClientNameChange(e.target.value)}
-                    className="w-full border border-brand-border p-4 rounded-xl font-bold bg-brand-bg text-brand-text focus:border-brand-primary/50 transition-all outline-none"
-                    placeholder="Busque o escriba..."
-                  />
+              <div className="p-6 md:p-8 border-b border-brand-border flex justify-between items-center bg-gradient-to-r from-brand-surface to-brand-bg">
+                <div className="flex items-center gap-4">
+                  <div className="bg-brand-primary/10 p-3 rounded-2xl border border-brand-primary/20">
+                    <TrendingUp className="w-6 h-6 text-brand-primary" />
+                  </div>
+                  <div>
+                    <h2 className="text-xl font-black text-brand-text uppercase tracking-tight">NUEVA INVERSIÓN</h2>
+                    <p className="text-[10px] font-black text-brand-text/30 uppercase tracking-widest">Apertura de Préstamo Personal</p>
+                  </div>
                 </div>
+                <button onClick={(e) => closeAllModals(e)} className="text-brand-text/20 hover:text-brand-text p-2"><X className="w-6 h-6" /></button>
+              </div>
 
-                <div>
-                  <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2">Teléfono</label>
-                  <input 
-                    required 
-                    value={newLoanForm.phone}
-                    onChange={(e) => setNewLoanForm({...newLoanForm, phone: e.target.value})}
-                    className="w-full border border-brand-border p-4 rounded-xl font-bold bg-brand-bg text-brand-text focus:border-brand-primary/50 transition-all outline-none"
-                    placeholder="8090000000"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2">Cédula</label>
-                  <input 
-                    value={newLoanForm.idNumber}
-                    onChange={(e) => setNewLoanForm({...newLoanForm, idNumber: e.target.value})}
-                    className="w-full border border-brand-border p-4 rounded-xl font-bold bg-brand-bg text-brand-text focus:border-brand-primary/50 transition-all outline-none"
-                    placeholder="000-0000000-0"
-                  />
-                </div>
-
-                <div className="md:col-span-2">
-                  <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2">Dirección de Residencia</label>
-                  <input 
-                    required
-                    value={newLoanForm.address}
-                    onChange={(e) => setNewLoanForm({...newLoanForm, address: e.target.value})}
-                    className="w-full border border-brand-border p-4 rounded-xl font-bold bg-brand-bg text-brand-text focus:border-brand-primary/50 transition-all outline-none"
-                    placeholder="Calle, No. Casa, Sector, Ciudad..."
-                  />
-                </div>
-
-                <div className="md:col-span-2">
-                  <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2">Lugar de Trabajo</label>
-                  <input 
-                    required
-                    value={newLoanForm.workplace}
-                    onChange={(e) => setNewLoanForm({...newLoanForm, workplace: e.target.value})}
-                    className="w-full border border-brand-border p-4 rounded-xl font-bold bg-brand-bg text-brand-text focus:border-brand-primary/50 transition-all outline-none"
-                    placeholder="Empresa o Negocio donde labora..."
-                  />
-                </div>
-
-                <div className="md:col-span-2">
-                  <div className="bg-brand-bg p-6 rounded-2xl border border-brand-border space-y-6 shadow-inner">
+              <form onSubmit={handleSaveNewLoan} className="p-6 md:p-10 space-y-8 flex-1 overflow-y-auto bg-brand-bg/30">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="md:col-span-2">
+                    <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2 px-1">Cliente Completo</label>
+                    <input 
+                      required 
+                      value={newLoanForm.client}
+                      onChange={(e) => setNewLoanForm({...newLoanForm, client: e.target.value})}
+                      className="w-full bg-brand-surface border border-brand-border p-4 rounded-xl font-bold text-brand-text focus:border-brand-primary outline-none shadow-sm transition-all"
+                      placeholder="Juan Pérez..."
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2 px-1">Teléfono</label>
+                    <input 
+                      required 
+                      value={newLoanForm.phone}
+                      onChange={(e) => setNewLoanForm({...newLoanForm, phone: e.target.value})}
+                      className="w-full bg-brand-surface border border-brand-border p-4 rounded-xl font-bold text-brand-text focus:border-brand-primary outline-none shadow-sm transition-all"
+                      placeholder="809-000-0000"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2 px-1">Fecha de Inicio</label>
+                    <input 
+                      type="date"
+                      required 
+                      value={newLoanForm.startDate}
+                      onChange={(e) => setNewLoanForm({...newLoanForm, startDate: e.target.value})}
+                      className="w-full bg-brand-surface border border-brand-border p-4 rounded-xl font-black text-xs text-brand-text/60 focus:border-brand-primary outline-none shadow-sm"
+                    />
+                  </div>
+                  
+                  <div className="md:col-span-2 border-t border-brand-border pt-6 grid grid-cols-1 md:grid-cols-2 gap-6">
                     <div>
-                      <label className="block text-[10px] font-black text-brand-primary uppercase tracking-widest mb-2">Capital a Entregar ($)</label>
+                      <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2 px-1">Método de Cálculo</label>
+                      <div className="flex gap-2">
+                        <button 
+                          type="button"
+                          onClick={() => setNewLoanForm({...newLoanForm, calcMethod: 'interes'})}
+                          className={`flex-1 py-3 rounded-xl font-black text-[9px] uppercase border transition-all ${newLoanForm.calcMethod === 'interes' ? 'bg-brand-primary text-white border-brand-primary shadow-lg shadow-brand-primary/20' : 'bg-brand-surface text-brand-text/40 border-brand-border'}`}
+                        >Por Interés (%)</button>
+                        <button 
+                          type="button"
+                          onClick={() => setNewLoanForm({...newLoanForm, calcMethod: 'fija'})}
+                          className={`flex-1 py-3 rounded-xl font-black text-[9px] uppercase border transition-all ${newLoanForm.calcMethod === 'fija' ? 'bg-brand-primary text-white border-brand-primary shadow-lg shadow-brand-primary/20' : 'bg-brand-surface text-brand-text/40 border-brand-border'}`}
+                        >Cuota Fija ($)</button>
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-black text-brand-primary uppercase tracking-widest mb-2 px-1">Capital a Invertir ($)</label>
                       <input 
                         type="number"
                         required 
                         value={newLoanForm.capital}
                         onChange={(e) => setNewLoanForm({...newLoanForm, capital: e.target.value})}
-                        className="w-full border border-brand-border p-4 rounded-xl font-black text-2xl text-brand-primary bg-brand-surface focus:border-brand-primary/50 transition-all outline-none font-mono"
+                        className="w-full bg-brand-surface border-2 border-brand-primary/20 p-4 rounded-xl font-black text-lg text-brand-text focus:border-brand-primary outline-none shadow-xl shadow-brand-primary/5 font-mono"
+                        placeholder="0"
                       />
                     </div>
-                    
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      <div className="flex-1">
-                        <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2">Utilidad</label>
-                        <div className="flex gap-2">
-                          <select 
-                            value={newLoanForm.calcMethod}
-                            onChange={(e) => setNewLoanForm({...newLoanForm, calcMethod: e.target.value})}
-                            className="bg-brand-secondary border border-brand-border p-3 rounded-xl font-black text-[9px] uppercase outline-none text-brand-text"
-                          >
-                            <option value="interes">% TASA</option>
-                            <option value="fija">$ CUOTA</option>
-                          </select>
-                          <input 
-                            type="number"
-                            required 
-                            value={newLoanForm.calcMethod === 'interes' ? newLoanForm.interestRate : newLoanForm.fixedQuota}
-                            onChange={(e) => setNewLoanForm({...newLoanForm, [newLoanForm.calcMethod === 'interes' ? 'interestRate' : 'fixedQuota']: e.target.value})}
-                            className="w-full border border-brand-border p-4 rounded-xl font-bold bg-brand-surface text-brand-text focus:border-brand-primary/50 outline-none"
-                          />
-                        </div>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-2">
-                        <div>
-                          <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2">Cuotas</label>
-                          <input 
-                            type="number"
-                            required 
-                            value={newLoanForm.installments}
-                            onChange={(e) => setNewLoanForm({...newLoanForm, installments: e.target.value})}
-                            className="w-full border border-brand-border p-4 rounded-xl font-bold bg-brand-surface text-brand-text focus:border-brand-primary/50 outline-none font-mono"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2">Frecuencia</label>
-                          <select 
-                            value={newLoanForm.freqDays}
-                            onChange={(e) => setNewLoanForm({...newLoanForm, freqDays: e.target.value})}
-                            className="w-full border border-brand-border p-4 rounded-xl font-black text-[9px] uppercase bg-brand-surface text-brand-text focus:border-brand-primary/50 outline-none"
-                          >
-                            <option value="1">DIARIO</option>
-                            <option value="7">SEMANAL</option>
-                            <option value="15">QUINCENAL</option>
-                            <option value="30">MENSUAL</option>
-                          </select>
-                        </div>
-                      </div>
-                    </div>
                   </div>
-                </div>
 
-                <button 
-                  type="submit"
-                  disabled={isSubmitting}
-                  className={`md:col-span-2 bg-brand-primary text-white py-5 rounded-xl font-black uppercase text-[10px] tracking-widest shadow-xl shadow-brand-primary/20 transition-all ${isSubmitting ? 'opacity-50 cursor-not-allowed' : 'hover:bg-brand-primary/80 active:scale-[0.98]'}`}
-                >
-                  {isSubmitting ? 'PROCESANDO...' : 'AUTORIZAR PRÉSTAMO'}
-                </button>
-                {formError && (
-                  <div className="md:col-span-2 bg-brand-red/10 border border-brand-red/20 p-4 rounded-xl flex items-center gap-3">
-                    <AlertCircle className="w-5 h-5 text-brand-red shrink-0" />
-                    <p className="text-[10px] font-black text-brand-red uppercase tracking-tight">{formError}</p>
-                  </div>
-                )}
-              </form>
-            </motion.div>
-          </div>
-        )}
-
-        {/* Modal Renovación */}
-        {showRenewModal && currentLoan && (
-          <div className="fixed inset-0 bg-brand-bg/95 z-50 flex items-center justify-center p-4 backdrop-blur-md overflow-y-auto">
-            <motion.div 
-              initial={{ opacity: 0, y: 30 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="bg-brand-surface rounded-2xl w-full max-w-xl shadow-2xl p-10 relative border border-brand-border"
-            >
-              <button onClick={closeAllModals} className="absolute top-8 right-8 text-brand-text/20 hover:text-brand-text">
-                <X className="w-6 h-6" />
-              </button>
-              
-              <div className="mb-8">
-                <h2 className="text-2xl font-black text-brand-text tracking-tight uppercase">RENOVAR PRÉSTAMO</h2>
-                <p className="text-brand-text/40 font-bold text-[10px] uppercase tracking-widest">Renovación para: {currentLoan.client}</p>
-              </div>
-
-              <div className="bg-brand-red/5 border border-brand-red/10 p-6 rounded-2xl mb-8 flex justify-between items-center">
-                <div>
-                  <p className="text-[9px] font-black text-brand-red uppercase tracking-widest mb-1">Saldo Actual a Liquidar</p>
-                  <p className="text-2xl font-black text-brand-red font-mono">{formatMoney(currentLoan.remaining)}</p>
-                </div>
-                <div className="text-right">
-                  <p className="text-[9px] font-black text-brand-text/40 uppercase tracking-widest mb-1">Caja Disponible</p>
-                  <p className="text-lg font-bold text-brand-text font-mono">{formatMoney(totals.caja)}</p>
-                </div>
-              </div>
-
-              <form onSubmit={handleRenewLoan} className="space-y-6">
-                <div>
-                  <label className="block text-[10px] font-black text-brand-primary uppercase tracking-widest mb-2">Nuevo Capital Deseado ($)</label>
-                  <input 
-                    type="number"
-                    required 
-                    value={renewForm.capital}
-                    onChange={(e) => setRenewForm({...renewForm, capital: e.target.value})}
-                    className="w-full border border-brand-border p-4 rounded-xl font-black text-2xl text-brand-primary bg-brand-bg focus:border-brand-primary/50 transition-all outline-none font-mono"
-                    placeholder="0.00"
-                  />
-                  {renewForm.capital && (
-                    <p className="mt-2 text-[10px] font-black uppercase text-brand-text/50">
-                      Entregar al cliente neto: <span className="text-brand-green">{formatMoney(parseFloat(renewForm.capital) - currentLoan.remaining)}</span>
-                    </p>
-                  )}
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="flex-1">
-                    <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2">Utilidad</label>
-                    <div className="flex gap-2">
-                      <select 
-                        value={renewForm.calcMethod}
-                        onChange={(e) => setRenewForm({...renewForm, calcMethod: e.target.value})}
-                        className="bg-brand-secondary border border-brand-border p-3 rounded-xl font-black text-[9px] uppercase outline-none text-brand-text"
-                      >
-                        <option value="interes">% TASA</option>
-                        <option value="fija">$ CUOTA</option>
-                      </select>
+                  <div className="md:col-span-2 grid grid-cols-1 md:grid-cols-3 gap-6">
+                    {newLoanForm.calcMethod === 'interes' ? (
+                      <div>
+                        <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2 px-1">Tasa Interés (%)</label>
+                        <input 
+                          type="number"
+                          required 
+                          value={newLoanForm.interestRate}
+                          onChange={(e) => setNewLoanForm({...newLoanForm, interestRate: e.target.value})}
+                          className="w-full bg-brand-surface border border-brand-border p-4 rounded-xl font-black text-lg text-brand-text focus:border-brand-primary outline-none font-mono"
+                          placeholder="20"
+                        />
+                      </div>
+                    ) : (
+                      <div>
+                        <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2 px-1">Monto Cuota ($)</label>
+                        <input 
+                          type="number"
+                          required 
+                          value={newLoanForm.fixedQuota}
+                          onChange={(e) => setNewLoanForm({...newLoanForm, fixedQuota: e.target.value})}
+                          className="w-full bg-brand-surface border border-brand-border p-4 rounded-xl font-black text-lg text-brand-text focus:border-brand-primary outline-none font-mono"
+                          placeholder="2700"
+                        />
+                      </div>
+                    )}
+                    <div>
+                      <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2 px-1">Núm. Cuotas</label>
                       <input 
                         type="number"
                         required 
-                        value={renewForm.calcMethod === 'interes' ? renewForm.interestRate : renewForm.fixedQuota}
-                        onChange={(e) => setRenewForm({...renewForm, [renewForm.calcMethod === 'interes' ? 'interestRate' : 'fixedQuota']: e.target.value})}
-                        className="w-full border border-brand-border p-4 rounded-xl font-bold bg-brand-bg text-brand-text focus:border-brand-primary/50 outline-none"
+                        value={newLoanForm.installments}
+                        onChange={(e) => setNewLoanForm({...newLoanForm, installments: e.target.value})}
+                        className="w-full bg-brand-surface border border-brand-border p-4 rounded-xl font-black text-lg text-brand-text focus:border-brand-primary outline-none font-mono"
+                        placeholder="8"
                       />
                     </div>
-                  </div>
-
-                  <div>
-                    <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2">Cuotas</label>
-                    <input 
-                      type="number"
-                      required 
-                      value={renewForm.installments}
-                      onChange={(e) => setRenewForm({...renewForm, installments: e.target.value})}
-                      className="w-full border border-brand-border p-4 rounded-xl font-bold bg-brand-bg text-brand-text focus:border-brand-primary/50 outline-none font-mono"
-                    />
+                    <div>
+                      <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2 px-1">Frecuencia</label>
+                      <select 
+                        value={newLoanForm.freqDays}
+                        onChange={(e) => setNewLoanForm({...newLoanForm, freqDays: e.target.value})}
+                        className="w-full bg-brand-surface border border-brand-border p-4 rounded-xl font-black text-xs uppercase text-brand-text focus:border-brand-primary outline-none cursor-pointer"
+                      >
+                        <option value="1">Diario</option>
+                        <option value="7">Semanal</option>
+                        <option value="15">Quincenal</option>
+                        <option value="30">Mensual</option>
+                      </select>
+                    </div>
                   </div>
                 </div>
 
-                <button 
-                  type="submit"
-                  disabled={isSubmitting}
-                  className={`w-full bg-brand-primary text-white py-5 rounded-xl font-black uppercase text-[10px] tracking-widest shadow-xl shadow-brand-primary/20 transition-all ${isSubmitting ? 'opacity-50' : 'hover:bg-brand-primary/80 active:scale-[0.98]'}`}
-                >
-                  {isSubmitting ? 'PROCESANDO...' : 'PROCESAR RENOVACIÓN'}
-                </button>
+                {formError && <p className="text-brand-red text-[10px] font-black uppercase text-center bg-brand-red/5 py-4 rounded-xl border border-brand-red/10">{formError}</p>}
 
-                {formError && (
-                  <div className="bg-brand-red/10 border border-brand-red/20 p-4 rounded-xl flex items-center gap-3">
-                    <AlertCircle className="w-5 h-5 text-brand-red shrink-0" />
-                    <p className="text-[10px] font-black text-brand-red uppercase tracking-tight">{formError}</p>
-                  </div>
-                )}
+                <div className="pt-4 flex gap-4">
+                  <button 
+                    type="button" 
+                    onClick={(e) => closeAllModals(e)}
+                    className="flex-1 bg-brand-bg text-brand-text/30 py-5 rounded-2xl font-black uppercase text-[10px] tracking-widest border border-brand-border hover:bg-brand-secondary transition-all"
+                  >CANCELAR</button>
+                  <button 
+                    type="submit"
+                    disabled={isSubmitting}
+                    className="flex-1 bg-brand-primary text-white py-5 rounded-2xl font-black uppercase text-[10px] tracking-widest shadow-2xl shadow-brand-primary/30 hover:bg-brand-primary/90 active:scale-[0.98] transition-all"
+                  >
+                    {isSubmitting ? 'GENERANDO...' : 'REGISTRAR PRÉSTAMO'}
+                  </button>
+                </div>
               </form>
             </motion.div>
           </div>
         )}
+      </AnimatePresence>
 
-        {/* Modal Plan de Pagos */}
-        {showScheduleModal && currentLoan && (
-          <div className="fixed inset-0 bg-brand-bg/95 z-50 flex items-center justify-center p-0 md:p-4 backdrop-blur-md">
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.98, y: 50 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              className="bg-brand-surface w-full h-full md:h-auto md:max-w-2xl md:rounded-2xl overflow-hidden flex flex-col max-h-[100vh] md:max-h-[90vh] border border-brand-border shadow-2xl"
-            >
-              <div className="bg-brand-surface p-6 md:p-8 border-b border-brand-border relative sticky top-0 z-10">
-                <button onClick={closeAllModals} className="absolute top-6 right-6 text-brand-text/20 hover:text-brand-text">
-                  <X className="w-6 h-6" />
-                </button>
-                <div className="flex flex-col md:flex-row md:items-center justify-between mb-6 gap-4 pr-10">
-                  <div className="flex items-center gap-4">
-                    <div className="bg-brand-bg border border-brand-border p-3 rounded-xl shadow-inner shrink-0">
-                      <ListChecks className="w-6 h-6 text-brand-primary" />
-                    </div>
-                    <h2 className="text-xl md:text-2xl font-black tracking-tight uppercase truncate text-brand-text">
-                      {currentLoan.client}
-                    </h2>
-                  </div>
-                  <div className="flex bg-brand-bg p-1 rounded-xl border border-brand-border w-full md:w-auto">
-                    <button 
-                      onClick={() => setActiveScheduleTab('plan')}
-                      className={`flex-1 md:flex-none px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all ${activeScheduleTab === 'plan' ? 'bg-brand-primary text-white shadow-md' : 'text-brand-text/40'}`}
-                    >
-                      Plan
-                    </button>
-                    <button 
-                      onClick={() => setActiveScheduleTab('pagos')}
-                      className={`flex-1 md:flex-none px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all ${activeScheduleTab === 'pagos' ? 'bg-brand-primary text-white shadow-md' : 'text-brand-text/40'}`}
-                    >
-                      Pagos
-                    </button>
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-4 md:gap-12 pt-4 border-t border-brand-border/10">
-                  <div>
-                    <p className="text-[9px] font-black text-brand-text/30 uppercase tracking-widest mb-1">Inició Préstamo</p>
-                    <p className="font-bold text-brand-text/60 text-[10px] md:text-sm">{currentLoan.date}</p>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-[9px] font-black text-brand-text/30 uppercase tracking-widest mb-1">Saldo por Cobrar</p>
-                    <p className="text-lg md:text-xl font-black text-brand-primary font-mono">{formatMoney(currentLoan.remaining)}</p>
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex-1 overflow-y-auto">
-                  {activeScheduleTab === 'plan' ? (
-                    <div className="flex flex-col divide-y divide-brand-border">
-                      <div className="hidden md:block p-10 bg-white text-slate-900 selection:bg-brand-primary border-b border-brand-border" id="schedule-content">
-                        <div className="text-center mb-8 border-b-2 border-brand-primary pb-4">
-                          <h2 className="text-4xl font-black text-brand-primary uppercase tracking-tighter">PRESTAFÁCIL</h2>
-                          <p className="text-[10px] font-black tracking-[0.3em] text-slate-400 uppercase mt-2">Plan de Pagos Detallado</p>
-                        </div>
-                        
-                        <div className="grid grid-cols-2 gap-8 mb-8 text-[10px]">
-                           <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
-                              <p className="text-[9px] font-black text-slate-400 uppercase mb-1">Cliente</p>
-                              <p className="font-bold uppercase text-slate-900">{currentLoan.client}</p>
-                           </div>
-                           <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
-                              <p className="text-[9px] font-black text-slate-400 uppercase mb-1">Monto Adeudado</p>
-                              <p className="font-bold text-slate-900">{formatMoney(currentLoan.debt)}</p>
-                           </div>
-                        </div>
-
-                        <table className="w-full text-left">
-                           <thead>
-                              <tr className="border-b-2 border-slate-100">
-                                 <th className="py-2 text-[10px] font-black text-slate-400 uppercase">No.</th>
-                                 <th className="py-2 text-[10px] font-black text-slate-400 uppercase">Vencimiento</th>
-                                 <th className="py-2 text-[10px] font-black text-slate-400 uppercase text-right">Monto</th>
-                                 <th className="py-2 text-[10px] font-black text-slate-400 uppercase text-right">Estado</th>
-                              </tr>
-                           </thead>
-                           <tbody className="divide-y divide-slate-100">
-                              {calculateSchedule(currentLoan).map(s => (
-                                 <tr key={s.num}>
-                                    <td className="py-3 font-bold text-xs text-slate-900">{s.num}</td>
-                                    <td className="py-3 font-bold text-xs text-slate-900">{s.date}</td>
-                                    <td className="py-3 font-bold text-xs text-right font-mono text-slate-900">{formatMoney(s.amount)}</td>
-                                    <td className={`py-3 font-black text-[9px] text-right uppercase ${s.status === 'PAGADO' ? 'text-brand-green' : s.status === 'MORA' ? 'text-brand-red' : 'text-brand-primary'}`}>{s.status}</td>
-                                 </tr>
-                              ))}
-                           </tbody>
-                        </table>
-                      </div>
-
-                      <div className="p-4 md:px-8 md:py-6 space-y-3 bg-brand-bg shadow-inner">
-                        {calculateSchedule(currentLoan).map((s) => (
-                          <div key={s.num} className={`bg-brand-surface p-4 rounded-xl border border-brand-border flex justify-between items-center ${s.status === 'PAGADO' ? 'opacity-30' : 'shadow-sm'}`}>
-                            <div className="flex items-center gap-3 md:gap-4">
-                              <div className="w-8 h-8 rounded bg-brand-bg border border-brand-border flex items-center justify-center font-bold text-[10px] text-brand-text/40 shrink-0">
-                                {s.num}
-                              </div>
-                              <div>
-                                <p className="font-black text-xs md:text-sm text-brand-text font-mono">
-                                  {formatMoney(s.amount)}
-                                  {s.mora > 0 && <span className="text-[8px] md:text-[9px] text-brand-red ml-1 md:ml-2 uppercase">MORA Incl.</span>}
-                                </p>
-                                <p className="text-[8px] md:text-[9px] font-bold text-brand-text/30 uppercase">{s.date}</p>
-                              </div>
-                            </div>
-                            <div className={`text-[8px] md:text-[9px] font-black uppercase px-2 md:px-3 py-1 rounded border ${s.status === 'PAGADO' ? 'bg-brand-green/10 text-brand-green border-brand-green/20' : s.status === 'MORA' ? 'bg-brand-red/10 text-brand-red border-brand-red/20' : 'bg-brand-primary/10 text-brand-primary border-brand-primary/20'}`}>
-                              {s.status === 'PAGADO' ? <Check className="w-3 h-3" /> : s.status}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="px-4 md:px-8 py-6 bg-brand-bg space-y-4">
-                      {transactions
-                        .filter(t => t.loanId === currentLoan.id || (t.concept.includes('Abono') && t.concept.includes(currentLoan.client)))
-                        .length === 0 ? (
-                          <div className="text-center py-20 text-brand-text/20 font-black uppercase text-xs">No hay pagos registrados</div>
-                        ) : (
-                          transactions
-                            .filter(t => t.loanId === currentLoan.id || (t.concept.includes('Abono') && t.concept.includes(currentLoan.client)))
-                            .map(t => (
-                              <div key={t.id} className="bg-brand-surface p-4 md:p-6 rounded-2xl border border-brand-border flex items-center justify-between group">
-                                <div className="flex items-center gap-3 md:gap-4">
-                                  <div className="bg-brand-green/10 p-2 md:p-3 rounded-xl border border-brand-green/20 text-brand-green h-fit">
-                                    <ArrowDownRight className="w-4 h-4 md:w-5 md:h-5" />
-                                  </div>
-                                  <div>
-                                    <p className="text-base md:text-lg font-black text-brand-text font-mono tracking-tighter">{formatMoney(t.amount)}</p>
-                                    <p className="text-[8px] md:text-[9px] font-black text-brand-text/30 uppercase">{new Date(t.date).toLocaleString('es-DO')}</p>
-                                  </div>
-                                </div>
-                                <div className="flex gap-2">
-                                  <button 
-                                    onClick={() => handlePrintOldReceipt(t)}
-                                    className="p-2 md:p-3 bg-brand-secondary text-brand-text/50 rounded-lg hover:text-brand-primary transition-all border border-brand-border"
-                                    title="Volver a imprimir recibo"
-                                  >
-                                    <Printer className="w-4 h-4" />
-                                  </button>
-                                  <button 
-                                    onClick={() => handleReversePayment(t)}
-                                    className="p-2 md:p-3 bg-brand-red/5 text-brand-red/30 rounded-lg hover:text-brand-red hover:bg-brand-red/10 transition-all border border-brand-red/10"
-                                    title="Reversar pago"
-                                  >
-                                    <Trash className="w-4 h-4" />
-                                  </button>
-                                </div>
-                              </div>
-                            ))
-                        )
-                      }
-                    </div>
-                  )}
-              </div>
-
-              <div className="p-4 md:p-8 border-t border-brand-border flex flex-col md:flex-row gap-3 bg-brand-surface sticky bottom-0">
-                <button 
-                  onClick={handleDownloadSchedulePDF}
-                  disabled={isSubmitting}
-                  className="flex-1 bg-brand-primary text-white py-4 rounded-xl font-black uppercase text-[10px] tracking-widest flex items-center justify-center gap-2 shadow-lg shadow-brand-primary/20 hover:bg-brand-primary/90 transition-all active:scale-95"
-                >
-                  <Download className="w-4 h-4" /> PLAN COMPLETO PDF
-                </button>
-                <button 
-                  onClick={closeAllModals}
-                  className="flex-1 bg-brand-secondary text-brand-text/50 py-4 rounded-xl font-black uppercase text-[10px] tracking-widest border border-brand-border hover:bg-brand-secondary/80 transition-all active:scale-95"
-                >
-                  CERRAR
-                </button>
-              </div>
-            </motion.div>
-          </div>
-        )}
-
+      <AnimatePresence>
         {/* Modal Editar */}
         {showEditModal && currentLoan && (
           <div className="fixed inset-0 bg-brand-bg/95 z-50 flex items-center justify-center p-0 md:p-4 backdrop-blur-md overflow-y-auto">
             <motion.div 
               initial={{ opacity: 0, scale: 0.98, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.98, y: 20 }}
               className="bg-brand-surface w-full min-h-screen md:min-h-0 md:max-w-xl md:rounded-2xl shadow-2xl p-6 md:p-10 relative border border-brand-border"
             >
-              <button onClick={closeAllModals} className="absolute top-6 right-6 text-brand-text/20 hover:text-brand-text">
+              <button onClick={(e) => closeAllModals(e)} className="absolute top-6 right-6 text-brand-text/20 hover:text-brand-text z-10 p-2">
                 <X className="w-6 h-6" />
               </button>
               
@@ -2087,6 +2174,17 @@ export default function App() {
                   />
                 </div>
                 <div>
+                  <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2 text-brand-primary">Cuota Fija (Manual)</label>
+                  <input 
+                    type="number"
+                    step="any"
+                    placeholder="Ej: 2700"
+                    value={editForm.fixedQuota}
+                    onChange={(e) => setEditForm({...editForm, fixedQuota: e.target.value})}
+                    className="w-full border-2 border-brand-primary/20 p-4 rounded-xl font-bold bg-brand-primary/5 text-brand-primary focus:border-brand-primary transition-all outline-none font-mono"
+                  />
+                </div>
+                <div>
                   <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2">Estado</label>
                   <select 
                     value={editForm.status}
@@ -2099,7 +2197,7 @@ export default function App() {
                   </select>
                 </div>
 
-                <div className="md:col-span-2 pt-4">
+                <div className="md:col-span-2 pt-4 flex flex-col gap-3">
                   <button 
                     type="submit"
                     disabled={isSubmitting}
@@ -2107,17 +2205,30 @@ export default function App() {
                   >
                     {isSubmitting ? 'GUARDANDO...' : 'GUARDAR CAMBIOS'}
                   </button>
+
+                  <button 
+                    type="button"
+                    onClick={handleDeleteLoan}
+                    disabled={isSubmitting}
+                    className="w-full bg-brand-red/10 text-brand-red py-4 rounded-xl font-black uppercase text-[9px] tracking-widest border border-brand-red/20 hover:bg-brand-red hover:text-white transition-all shadow-sm"
+                  >
+                    ELIMINAR PRÉSTAMO POR COMPLETO
+                  </button>
+                  
                   {formError && <p className="mt-4 text-brand-red text-[10px] font-black uppercase text-center">{formError}</p>}
                 </div>
               </form>
             </motion.div>
           </div>
         )}
+      </AnimatePresence>
 
+      <AnimatePresence>
         {/* Modal Contrato */}
         {showContractModal && currentLoan && (
-          <div className="fixed inset-0 bg-brand-bg/95 z-50 flex items-center justify-center p-4 backdrop-blur-sm overflow-y-auto">
+          <div className="fixed inset-0 bg-brand-bg/95 z-50 flex items-center justify-center p-4 backdrop-blur-sm overflow-y-auto printable-area">
             <motion.div 
+              id="contract-pdf-content"
               initial={{ opacity: 0, scale: 0.99, y: 10 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               className="bg-white rounded-3xl w-full max-w-4xl shadow-[0_0_100px_rgba(0,0,0,0.3)] relative overflow-hidden flex flex-col max-h-[92vh] border border-brand-border"
@@ -2129,7 +2240,7 @@ export default function App() {
                   </div>
                   <h2 className="text-sm font-black text-slate-900 uppercase tracking-tight">Contrato Digital de Préstamo</h2>
                 </div>
-                <button onClick={closeAllModals} className="text-slate-400 hover:text-slate-900 transition-colors"><X /></button>
+                <button onClick={(e) => closeAllModals(e)} className="text-slate-400 hover:text-slate-900 transition-colors"><X /></button>
               </div>
 
               <div className="flex-1 overflow-y-auto p-12 bg-white text-slate-900 selection:bg-brand-primary" id="contract-view" style={{ color: '#0f172a' }}>
@@ -2157,14 +2268,44 @@ export default function App() {
 
                   <div className="space-y-4 text-sm">
                     <p>
-                      Me comprometo a pagar la suma total adeudada de <span className="font-black">{formatMoney(currentLoan.debt)}</span>, 
+                      Me comprometo a pagar la suma total adeudada de <span className="font-black">
+                        {formatMoney((currentLoan.fixedQuota && currentLoan.fixedQuota > 0) ? (currentLoan.fixedQuota * currentLoan.installments) : currentLoan.debt)}
+                      </span>, 
                       incluyendo los intereses generados, mediante un plan de 
                       <span className="font-bold"> {currentLoan.installments} cuotas</span> de 
-                      <span className="font-bold"> {formatMoney(currentLoan.debt / currentLoan.installments)}</span>, 
-                      con una frecuencia de pago <span className="font-bold">{currentLoan.freqDays} días</span>.
+                      <span className="font-bold"> {formatMoney(currentLoan.fixedQuota || (currentLoan.debt / currentLoan.installments))}</span>, 
+                      con una frecuencia de pago cada <span className="font-bold">{currentLoan.freqDays} días</span>.
                     </p>
+
+                    <div className="mt-8 border border-slate-200 rounded-xl overflow-hidden print:border-slate-400">
+                      <table className="w-full text-[10px] text-left border-collapse">
+                        <thead className="bg-slate-50 border-b border-slate-200">
+                          <tr>
+                            <th className="px-4 py-2 font-black uppercase">Cuota</th>
+                            <th className="px-4 py-2 font-black uppercase">Vencimiento</th>
+                            <th className="px-4 py-2 font-black uppercase text-right">Monto</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {calculateSchedule(currentLoan).slice(0, 8).map(s => (
+                            <tr key={s.num}>
+                              <td className="px-4 py-2">#{s.num}</td>
+                              <td className="px-4 py-2 font-mono uppercase">{s.date}</td>
+                              <td className="px-4 py-2 text-right font-black">{formatMoney(s.amount)}</td>
+                            </tr>
+                          ))}
+                          {currentLoan.installments > 8 && (
+                            <tr>
+                              <td colSpan={3} className="px-4 py-1 text-center text-[8px] bg-slate-50 text-slate-400 font-bold uppercase italic">
+                                ... se omiten {currentLoan.installments - 8} cuotas intermedias ...
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
                     
-                    <p>
+                    <p className="mt-6">
                       <span className="font-black underline">PENALIDAD POR INCUMPLIMIENTO:</span> El deudor acepta y reconoce que, en caso de retraso en el pago de cualquier cuota según la fecha establecida en el plan de pagos, se generará de forma automática un interés penal por mora equivalente al <span className="font-bold text-doc-accent">5% DIARIO</span> sobre el monto total de la deuda restante, hasta la regularización del pago.
                     </p>
 
@@ -2196,154 +2337,47 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="p-8 border-t border-brand-border bg-brand-surface flex gap-4 no-print">
+              <div className="p-8 border-t border-brand-border bg-brand-surface flex gap-4 no-print sticky bottom-0">
                 <button 
-                  onClick={async () => {
-                    const docElement = document.getElementById('contract-view');
-                    if (!docElement) return;
-                    setIsSubmitting(true);
-                    try {
-                      const docElement = document.getElementById('contract-view');
-                      if (!docElement) return;
-                      
-                      const canvas = await html2canvas(docElement, { 
-                        scale: 1.5,
-                        useCORS: true,
-                        backgroundColor: '#ffffff',
-                        logging: false,
-                        scrollX: 0,
-                        scrollY: 0,
-                        windowHeight: docElement.scrollHeight,
-                        onclone: (clonedDoc) => {
-                          const el = clonedDoc.getElementById('contract-view');
-                          if (el) {
-                            clonedDoc.querySelectorAll('style, link').forEach(s => s.remove());
-                            const style = clonedDoc.createElement('style');
-                            style.innerHTML = `
-                              #contract-view { font-family: serif; background: #ffffff; color: #0f172a; line-height: 1.6; }
-                              .max-w-4xl { max-width: 56rem; }
-                              .mx-auto { margin-left: auto; margin-right: auto; }
-                              .p-12 { padding: 3rem; }
-                              .bg-white { background-color: #ffffff; }
-                              .border { border: 1px solid #e2e8f0; }
-                              .shadow-2xl { box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25); }
-                              .rounded-3xl { border-radius: 1.5rem; }
-                              .mb-10 { margin-bottom: 2.5rem; }
-                              .text-4xl { font-size: 2.25rem; }
-                              .font-black { font-weight: 900; }
-                              .text-slate-900 { color: #0f172a; }
-                              .text-slate-400 { color: #94a3b8; }
-                              .text-sm { font-size: 0.875rem; }
-                              .tracking-\\[0\\.3em\\] { letter-spacing: 0.3em; }
-                              .font-bold { font-weight: 700; }
-                              .mb-12 { margin-bottom: 3rem; }
-                              .grid { display: grid; }
-                              .grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-                              .gap-8 { gap: 2rem; }
-                              .p-6 { padding: 1.5rem; }
-                              .bg-slate-50 { background-color: #f8fafc; }
-                              .rounded-2xl { border-radius: 1rem; }
-                              .text-xs { font-size: 0.75rem; }
-                              .text-slate-500 { color: #64748b; }
-                              .text-lg { font-size: 1.125rem; }
-                              .text-slate-800 { color: #1e293b; }
-                              .space-y-8 > * + * { margin-top: 2rem; }
-                              .text-\\[15px\\] { font-size: 15px; }
-                              .text-slate-700 { color: #334155; }
-                              .leading-relaxed { line-height: 1.625; }
-                              .text-justify { text-align: justify; }
-                              .pl-4 { padding-left: 1rem; }
-                              .border-l-4 { border-left-width: 4px; }
-                              .border-blue-600 { border-left-color: #2563eb; }
-                              .italic { font-style: italic; }
-                              .flex { display: flex; }
-                              .justify-between { justify-content: space-between; }
-                              .mt-20 { margin-top: 5rem; }
-                              .text-center { text-align: center; }
-                              .w-48 { width: 12rem; }
-                              .pt-4 { padding-top: 1rem; }
-                              .border-t-2 { border-top-width: 2px; }
-                              .border-slate-200 { border-top-color: #e2e8f0; }
-                              .mb-1 { margin-bottom: 0.25rem; }
-                              .text-slate-600 { color: #475569; }
-                              .text-\\[10px\\] { font-size: 10px; }
-                              .tracking-widest { letter-spacing: 0.1em; }
-                            `;
-                            clonedDoc.head.appendChild(style);
-                            
-                            el.style.height = 'auto';
-                            el.style.overflow = 'visible';
-                            el.style.width = '210mm'; 
-                          }
-                        }
-                      });
-                      
-                      const imgData = canvas.toDataURL('image/jpeg', 0.95);
-                      const pdf = new jsPDF({
-                        orientation: 'p',
-                        unit: 'mm',
-                        format: 'a4'
-                      });
-                      
-                      const pdfWidth = pdf.internal.pageSize.getWidth();
-                      const pdfHeight = pdf.internal.pageSize.getHeight();
-                      
-                      const canvasWidth = canvas.width;
-                      const canvasHeight = canvas.height;
-                      
-                      const imgWidth = pdfWidth - 20; 
-                      const imgHeight = (canvasHeight * imgWidth) / canvasWidth;
-                      
-                      let heightLeft = imgHeight;
-                      let position = 10; 
-                      let page = 1;
-
-                      pdf.addImage(imgData, 'JPEG', 10, position, imgWidth, imgHeight);
-                      heightLeft -= (pdfHeight - 20);
-
-                      while (heightLeft > 0) {
-                        position = 10 - (pdfHeight - 20) * page;
-                        pdf.addPage();
-                        pdf.addImage(imgData, 'JPEG', 10, position, imgWidth, imgHeight);
-                        heightLeft -= (pdfHeight - 20);
-                        page++;
-                      }
-
-                      pdf.save(`Contrato_${currentLoan.client.replace(/\s+/g, '_')}.pdf`);
-                    } catch (e) {
-                      console.error('PDF error:', e);
-                      alert("Error al generar PDF. Use la opción 'IMPRIMIR' y elija 'Guardar como PDF'.");
-                    } finally {
-                      setIsSubmitting(false);
-                    }
-                  }}
-                  disabled={isSubmitting}
-                  className={`flex-1 bg-brand-primary text-white py-4 rounded-xl font-black uppercase text-[10px] tracking-widest flex items-center justify-center gap-2 shadow-lg shadow-brand-primary/20 transition-all ${isSubmitting ? 'opacity-50' : 'hover:bg-brand-primary/80'}`}
+                  onClick={() => handleDownloadPDF('contract-pdf-content', `Contrato_${currentLoan.client.replace(/\s+/g, '_')}`)}
+                  className="flex-1 bg-slate-900 text-white py-5 rounded-2xl font-black uppercase text-[10px] tracking-widest flex items-center justify-center gap-3 hover:bg-black transition-all shadow-xl shadow-slate-900/20 active:scale-[0.98]"
                 >
-                  {isSubmitting ? 'GENERANDO...' : <><Download className="w-4 h-4" /> DESCARGAR PDF</>}
+                  <Download className="w-5 h-5" /> DESCARGAR CONTRATO PDF
                 </button>
                 <button 
-                  onClick={() => printElement('contract-view')}
-                  className="flex-1 bg-brand-secondary text-brand-text/70 py-4 rounded-xl font-black uppercase text-[10px] tracking-widest flex items-center justify-center gap-2 border border-brand-border hover:bg-brand-secondary/80 transition-all"
+                  onClick={(e) => closeAllModals(e)}
+                  className="px-10 bg-slate-100 text-slate-400 py-5 rounded-2xl font-black uppercase text-[10px] tracking-widest hover:bg-slate-200 transition-all border border-slate-200"
                 >
-                  <Printer className="w-4 h-4" /> IMPRIMIR
+                  CERRAR
                 </button>
               </div>
             </motion.div>
           </div>
         )}
+      </AnimatePresence>
 
+      <AnimatePresence>
         {/* Modal Gestión de Caja */}
         {showCashModal && (
-          <div className="fixed inset-0 bg-brand-bg/95 z-50 flex items-center justify-center p-0 md:p-4 backdrop-blur-md">
+          <div className="fixed inset-0 bg-brand-bg/95 z-50 flex items-center justify-center p-0 md:p-4 backdrop-blur-md printable-area">
             <motion.div 
+              id="cash-history-pdf-content"
               initial={{ opacity: 0, scale: 0.98, y: 10 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               className="bg-brand-surface w-full h-full md:h-auto md:max-w-xl md:rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[100vh] md:max-h-[85vh] border border-brand-border"
             >
               <div className="bg-brand-surface p-6 md:p-8 border-b border-brand-border flex justify-between items-center bg-gradient-to-r from-brand-surface to-brand-bg sticky top-0 z-10">
                 <h3 className="font-black text-sm md:text-lg uppercase tracking-tight text-brand-text">CONTROL DE CAJA</h3>
-                <button onClick={closeAllModals} className="text-brand-text/20 hover:text-brand-text p-2"><X /></button>
+                <div className="flex gap-2">
+                  <button 
+                    onClick={() => handleDownloadPDF('cash-history-pdf-content', `Reporte_Caja_${new Date().toLocaleDateString('es-DO').replace(/\//g, '-')}`)} 
+                    className="p-2 bg-brand-secondary text-brand-text/50 rounded-lg border border-brand-border hover:text-brand-primary no-print"
+                    title="Descargar Historial PDF"
+                  >
+                    <Download className="w-4 h-4" />
+                  </button>
+                <button onClick={(e) => closeAllModals(e)} className="text-brand-text/20 hover:text-brand-text p-2 no-print"><X /></button>
+                </div>
               </div>
               
               <div className="p-4 md:p-8 overflow-y-auto flex-1 space-y-6 md:space-y-8 bg-brand-bg/50">
@@ -2413,9 +2447,58 @@ export default function App() {
                             <p className="text-[8px] md:text-[9px] font-bold text-brand-text/30 uppercase">{new Date(t.date).toLocaleDateString()}</p>
                           </div>
                         </div>
-                        <p className={`font-black text-sm md:text-lg font-mono tracking-tighter shrink-0 ml-4 ${t.type === 'RETIRO' ? 'text-brand-red' : 'text-brand-green'}`}>
-                          {t.type === 'RETIRO' ? '-' : '+'}{formatMoney(t.amount)}
-                        </p>
+                        <div className="flex items-center gap-2">
+                          <p className={`font-black text-sm md:text-lg font-mono tracking-tighter shrink-0 ml-4 ${t.type === 'RETIRO' ? 'text-brand-red' : 'text-brand-green'}`}>
+                            {t.type === 'RETIRO' ? '-' : '+'}{formatMoney(t.amount)}
+                          </p>
+                          <div className="flex gap-1 md:gap-2 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-all">
+                            {t.type === 'INYECCION' && (
+                              <button 
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handlePrintOldReceipt(t);
+                                }}
+                                className="p-2 md:p-3 bg-brand-primary/10 text-brand-primary rounded-lg border border-brand-primary/20 hover:bg-brand-primary hover:text-white transition-all shadow-sm"
+                                title="Descargar Comprobante PDF"
+                              >
+                                <Download className="w-3.5 h-3.5 md:w-4 md:h-4" />
+                              </button>
+                            )}
+                            <button 
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedTransaction(t);
+                                setEditTransactionForm({ amount: t.amount.toString(), concept: t.concept, date: t.date.split('T')[0] });
+                                setShowEditTransactionModal(true);
+                              }}
+                              className="p-2 md:p-3 bg-brand-primary/10 text-brand-primary rounded-lg border border-brand-primary/20 hover:bg-brand-primary hover:text-white transition-all shadow-sm"
+                              title="Modificar"
+                            >
+                              <Edit className="w-3.5 h-3.5 md:w-4 md:h-4" />
+                            </button>
+                            <button 
+                              onClick={async (e) => {
+                                e.stopPropagation();
+                                if (t.loanId || t.concept.includes("Abono") || t.concept.includes("Pago")) {
+                                  handleReversePayment(t);
+                                } else {
+                                  if (window.confirm("¿Eliminar este movimiento de caja?")) {
+                                    try {
+                                      await deleteDoc(doc(db, 'artifacts', APP_DATA_PREFIX, 'users', user!.uid, 'transactions', t.id));
+                                      toast.success("Movimiento eliminado");
+                                    } catch (err: any) {
+                                      toast.error("Error al eliminar: " + err.message);
+                                    }
+                                  }
+                                }
+                              }}
+                              className="p-2 md:p-3 bg-brand-red/10 text-brand-red rounded-lg border border-brand-red/20 hover:bg-brand-red hover:text-white transition-all shadow-sm"
+                              title="Reversar / Eliminar"
+                            >
+                              <Trash2 className="w-3.5 h-3.5 md:w-4 md:h-4" />
+                            </button>
+                          </div>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -2424,13 +2507,94 @@ export default function App() {
             </motion.div>
           </div>
         )}
+      </AnimatePresence>
 
+      <AnimatePresence>
+        {/* Modal Estadísticas de Crecimiento */}
+        {showGrowthModal && (
+          <div className="fixed inset-0 bg-brand-bg/95 z-[100] flex items-center justify-center p-0 md:p-4 backdrop-blur-md">
+            <motion.div 
+               initial={{ opacity: 0, scale: 0.98 }}
+               animate={{ opacity: 1, scale: 1 }}
+               className="bg-brand-surface w-full h-full md:h-auto md:max-w-3xl md:rounded-2xl shadow-2xl border border-brand-border flex flex-col max-h-[100vh] md:max-h-[85vh] overflow-hidden"
+            >
+              <div className="p-6 md:p-8 border-b border-brand-border flex justify-between items-center bg-gradient-to-r from-brand-surface to-brand-bg sticky top-0 z-10">
+                <div>
+                  <h2 className="text-xl md:text-2xl font-black mb-1 uppercase tracking-tight text-brand-text">Crecimiento del Negocio</h2>
+                  <p className="text-brand-text/30 font-bold text-[10px] uppercase tracking-widest">Resumen de Recaudos Mensuales y Anuales</p>
+                </div>
+                <button onClick={(e) => closeAllModals(e)} className="text-brand-text/20 hover:text-brand-text"><X /></button>
+              </div>
+
+              <div className="p-4 md:p-8 overflow-y-auto flex-1 space-y-8 bg-brand-bg/50">
+                {/* Cuadros de Resumen Anual */}
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 gap-4">
+                  {growthStats.annual.map(([year, data]) => (
+                    <div key={year} className="bg-brand-surface p-6 rounded-2xl border border-brand-border shadow-sm flex justify-between items-center">
+                      <div>
+                        <p className="text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2">Utilidad Real Anual {year}</p>
+                        <h4 className="text-3xl font-black text-brand-green font-mono">{formatMoney(data.interest)}</h4>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2">Recaudo Total</p>
+                        <h4 className="text-xl font-black text-brand-text/50 font-mono">{formatMoney(data.total)}</h4>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Detalle Mensual */}
+                <div>
+                  <h3 className="text-xs font-black text-brand-text/50 uppercase tracking-widest mb-4 px-2">Historial Mensual</h3>
+                  <div className="space-y-3">
+                    {growthStats.monthly.map(([month, data]) => {
+                      const [y, m] = month.split('-');
+                      const monthName = new Date(parseInt(y), parseInt(m)-1).toLocaleDateString('es-DO', { month: 'long' });
+                      return (
+                        <div key={month} className="bg-brand-surface p-5 rounded-2xl border border-brand-border flex flex-col md:flex-row md:items-center justify-between gap-4">
+                          <div className="flex items-center gap-4">
+                            <div className="bg-brand-primary/10 w-12 h-12 rounded-xl flex items-center justify-center border border-brand-primary/20 text-brand-primary font-black uppercase text-xs">
+                              {monthName.substring(0, 3)}
+                            </div>
+                            <div>
+                              <p className="text-sm font-black text-brand-text uppercase">{monthName} {y}</p>
+                              <p className="text-[10px] font-bold text-brand-text/30 uppercase">{data.count} Cobros registrados</p>
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-2 gap-8 text-right">
+                            <div>
+                              <p className="text-[9px] font-black text-brand-text/30 uppercase tracking-widest mb-1">Recaudo Total</p>
+                              <h4 className="text-lg font-black text-brand-text/60 font-mono tracking-tighter">{formatMoney(data.total)}</h4>
+                            </div>
+                            <div>
+                              <p className="text-[9px] font-black text-brand-green/60 uppercase tracking-widest mb-1">Utilidad Real (Interés)</p>
+                              <h4 className="text-xl font-black text-brand-green font-mono tracking-tighter">{formatMoney(data.interest)}</h4>
+                            </div>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              </div>
+              <div className="p-6 bg-brand-bg border-t border-brand-border">
+                <button onClick={(e) => closeAllModals(e)} className="w-full bg-brand-secondary text-brand-text/50 py-4 rounded-xl font-black uppercase text-[10px] border border-brand-border transition-all active:scale-95">
+                  CERRAR PANEL
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
         {/* Modal Respaldos / Migración */}
         {showMigrationModal && (
           <div className="fixed inset-0 bg-brand-bg/95 z-[100] flex items-center justify-center p-4 backdrop-blur-sm">
             <motion.div 
                initial={{ opacity: 0, scale: 0.98 }}
                animate={{ opacity: 1, scale: 1 }}
+               exit={{ opacity: 0, scale: 0.98 }}
                className="bg-brand-surface rounded-2xl w-full max-w-2xl p-10 shadow-2xl border border-brand-border"
             >
               <div className="flex justify-between items-start mb-8">
@@ -2438,7 +2602,7 @@ export default function App() {
                   <h2 className="text-2xl font-black mb-1 uppercase tracking-tight text-brand-text">RESPALDO DE DATOS</h2>
                   <p className="text-brand-text/30 font-bold text-[10px] uppercase tracking-widest">Respaldo y Transferencia Manual</p>
                 </div>
-                <button onClick={() => setShowMigrationModal(false)} className="text-brand-text/20 hover:text-brand-text"><X /></button>
+                <button onClick={(e) => closeAllModals(e)} className="text-brand-text/20 hover:text-brand-text"><X /></button>
               </div>
               
               <div className="flex flex-col gap-4">
@@ -2518,7 +2682,7 @@ export default function App() {
 
                         await batch.commit();
                         toast.success("Sistema restaurado y datos migrados");
-                        setShowMigrationModal(false);
+                        closeAllModals();
                         setMigrationText('');
                       } catch (e: any) { 
                         console.error(e);
@@ -2532,9 +2696,98 @@ export default function App() {
                     <Upload className="w-4 h-4" /> {isSubmitting ? 'PROCESANDO...' : 'RESTAURAR'}
                   </button>
                 </div>
-                <button onClick={() => setShowMigrationModal(false)} className="w-full bg-brand-secondary text-brand-text/40 py-5 rounded-xl font-black uppercase text-[10px] border border-brand-border transition-all">
+                <button onClick={(e) => closeAllModals(e)} className="w-full bg-brand-secondary text-brand-text/40 py-5 rounded-xl font-black uppercase text-[10px] border border-brand-border transition-all">
                   CANCELAR
                 </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+      
+      {/* Modal Editar Movimiento */}
+      <AnimatePresence>
+        {showEditTransactionModal && selectedTransaction && (
+          <div className="fixed inset-0 bg-brand-bg/95 z-[120] flex items-center justify-center p-4 backdrop-blur-md">
+            <motion.div 
+               initial={{ opacity: 0, scale: 0.95 }}
+               animate={{ opacity: 1, scale: 1 }}
+               exit={{ opacity: 0, scale: 0.95 }}
+               className="bg-brand-surface w-full max-w-md rounded-2xl shadow-2xl border border-brand-border overflow-hidden"
+            >
+              <div className="p-6 border-b border-brand-border flex justify-between items-center bg-gradient-to-r from-brand-surface to-brand-bg">
+                <div>
+                  <h2 className="text-xl font-black uppercase text-brand-text">Modificar Movimiento</h2>
+                  <p className="text-brand-text/30 font-bold text-[10px] uppercase tracking-widest">Ajuste de registro contable</p>
+                </div>
+                <button onClick={(e) => closeAllModals(e)} className="text-brand-text/20 hover:text-brand-text"><X /></button>
+              </div>
+
+              <div className="p-6 space-y-4">
+                 <div>
+                    <label className="text-[10px] font-black text-brand-text/30 uppercase block mb-1">Monto ($)</label>
+                    <input 
+                      type="number"
+                      value={editTransactionForm.amount}
+                      onChange={(e) => setEditTransactionForm({...editTransactionForm, amount: e.target.value})}
+                      className="w-full bg-brand-bg border border-brand-border rounded-xl p-4 font-mono font-bold text-brand-text focus:border-brand-primary outline-none"
+                    />
+                 </div>
+                 <div>
+                    <label className="text-[10px] font-black text-brand-text/30 uppercase block mb-1">Concepto</label>
+                    <input 
+                      type="text"
+                      value={editTransactionForm.concept}
+                      onChange={(e) => setEditTransactionForm({...editTransactionForm, concept: e.target.value})}
+                      className="w-full bg-brand-bg border border-brand-border rounded-xl p-4 font-bold text-brand-text focus:border-brand-primary outline-none"
+                    />
+                 </div>
+                 <div>
+                    <label className="text-[10px] font-black text-brand-text/30 uppercase block mb-1">Fecha</label>
+                    <input 
+                      type="date"
+                      value={editTransactionForm.date}
+                      onChange={(e) => setEditTransactionForm({...editTransactionForm, date: e.target.value})}
+                      className="w-full bg-brand-bg border border-brand-border rounded-xl p-4 font-bold text-brand-text focus:border-brand-primary outline-none"
+                    />
+                 </div>
+
+                 <div className="flex flex-col gap-3 pt-4">
+                    <button 
+                      onClick={async () => {
+                        const amt = Number(editTransactionForm.amount);
+                        if (isNaN(amt)) return toast.error("Monto inválido");
+                        await handleUpdateTransaction(selectedTransaction, {
+                          amount: amt,
+                          concept: editTransactionForm.concept,
+                          date: new Date(editTransactionForm.date).toISOString()
+                        });
+                        closeAllModals();
+                      }}
+                      disabled={isSubmitting}
+                      className="w-full bg-brand-primary text-white py-4 rounded-xl font-black uppercase text-[10px] shadow-lg shadow-brand-primary/20 transition-all active:scale-95"
+                    >
+                      {isSubmitting ? 'GUARDANDO...' : 'GUARDAR CAMBIOS'}
+                    </button>
+                    
+                    <button 
+                      type="button"
+                      onClick={() => {
+                        handleReversePayment(selectedTransaction);
+                        closeAllModals();
+                      }}
+                      className="w-full bg-brand-red/10 text-brand-red py-4 rounded-xl font-black uppercase text-[10px] border border-brand-red/20 hover:bg-brand-red hover:text-white transition-all shadow-sm"
+                    >
+                      ELIMINAR MOVIMIENTO
+                    </button>
+
+                    <button 
+                      onClick={(e) => closeAllModals(e)}
+                      className="w-full bg-brand-bg text-brand-text/40 py-4 rounded-xl font-black uppercase text-[10px] border border-brand-border"
+                    >
+                      CANCELAR
+                    </button>
+                 </div>
               </div>
             </motion.div>
           </div>
