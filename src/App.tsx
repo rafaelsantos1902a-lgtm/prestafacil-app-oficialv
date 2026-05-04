@@ -55,6 +55,8 @@ interface Loan {
   installments: number;
   interestRate?: number;
   fixedQuota?: number;
+  hasCustomLastInstallment?: boolean;
+  customLastInstallment?: number;
 }
 
 interface Transaction {
@@ -112,12 +114,19 @@ export default function App() {
   const [paymentAmount, setPaymentAmount] = useState('');
   const [lastPaidAmount, setLastPaidAmount] = useState(0);
   const [newLoanForm, setNewLoanForm] = useState({
-    client: '', phone: '', idNumber: '', address: '', workplace: '', calcMethod: 'interes', capital: '', interestRate: '', fixedQuota: '', installments: '', freqDays: '15'
+    client: '', phone: '', idNumber: '', address: '', workplace: '', calcMethod: 'interes', capital: '', interestRate: '', fixedQuota: '', installments: '', freqDays: '15',
+    hasCustomLastInstallment: false, customLastInstallment: ''
   });
-  const [editForm, setEditForm] = useState({ client: '', phone: '', idNumber: '', address: '', workplace: '', debt: '', remaining: '', status: '', fixedQuota: '' });
+  const [editForm, setEditForm] = useState({ 
+    client: '', phone: '', idNumber: '', address: '', workplace: '', debt: '', remaining: '', status: '', fixedQuota: '',
+    hasCustomLastInstallment: false, customLastInstallment: ''
+  });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
-  const [renewForm, setRenewForm] = useState({ capital: '', calcMethod: 'interes', interestRate: '', fixedQuota: '', installments: '' });
+  const [renewForm, setRenewForm] = useState({ 
+    capital: '', calcMethod: 'interes', interestRate: '', fixedQuota: '', installments: '',
+    hasCustomLastInstallment: false, customLastInstallment: ''
+  });
   const [cashForm, setCashForm] = useState({ type: 'INYECCION' as 'INYECCION' | 'RETIRO', amount: '', concept: '' });
 
   useEffect(() => {
@@ -624,10 +633,17 @@ export default function App() {
     }
 
     let total = 0;
+    const hasCustomLast = renewForm.hasCustomLastInstallment;
+    const customLastAmount = parseFloat(renewForm.customLastInstallment) || 0;
+    
     if (renewForm.calcMethod === 'fija') {
       const fixed = parseFloat(renewForm.fixedQuota);
       if (isNaN(fixed) || fixed <= 0) return setFormError("Sueldo de cuota inválido.");
-      total = fixed * inst;
+      if (hasCustomLast && inst > 1) {
+        total = (fixed * (inst - 1)) + customLastAmount;
+      } else {
+        total = fixed * inst;
+      }
     } else {
       const rate = parseFloat(renewForm.interestRate);
       if (isNaN(rate) || rate < 0) return setFormError("Tasa inválida.");
@@ -659,7 +675,9 @@ export default function App() {
         freqDays: parseInt(newLoanForm.freqDays), // Reuse freq from main form or add to renew
         installments: inst,
         interestRate: renewForm.calcMethod === 'interes' ? parseFloat(renewForm.interestRate) : null,
-        fixedQuota: renewForm.calcMethod === 'fija' ? parseFloat(renewForm.fixedQuota) : null
+        fixedQuota: renewForm.calcMethod === 'fija' ? parseFloat(renewForm.fixedQuota) : null,
+        hasCustomLastInstallment: hasCustomLast,
+        customLastInstallment: hasCustomLast ? customLastAmount : null
       };
       batch.set(newLoanRef, loanData);
 
@@ -686,7 +704,10 @@ export default function App() {
       await batch.commit();
       setShowRenewModal(false);
       setSystemMessage(`✅ Préstamo renovado con éxito. Se entregó ${formatMoney(Math.max(0, netToDeliver))} neto.`);
-      setRenewForm({ capital: '', calcMethod: 'interes', interestRate: '', fixedQuota: '', installments: '' });
+      setRenewForm({ 
+        capital: '', calcMethod: 'interes', interestRate: '', fixedQuota: '', installments: '',
+        hasCustomLastInstallment: false, customLastInstallment: '' 
+      });
     } catch (err) {
       console.error(err);
       setFormError("Error al procesar renovación.");
@@ -730,9 +751,16 @@ export default function App() {
     const totalInst = Math.max(1, Number(loan.installments || 1));
     
     // Si existe una cuota fija definida, usarla. Si no, calcular debt / installments.
+    const hasCustomLast = !!loan.hasCustomLastInstallment && !!loan.customLastInstallment;
+    const customLastAmount = hasCustomLast ? Number(loan.customLastInstallment) : 0;
+    
+    // Cuota normal
     const quotaAmount = loan.fixedQuota && loan.fixedQuota > 0 
       ? loan.fixedQuota 
-      : (Number(loan.debt || 0) / totalInst);
+      : (hasCustomLast 
+          ? (totalInst > 1 ? (Number(loan.debt || 0) - customLastAmount) / (totalInst - 1) : customLastAmount)
+          : (Number(loan.debt || 0) / totalInst)
+        );
     
     let totalPaid = Number(loan.debt || 0) - Number(loan.remaining || 0);
     const today = new Date();
@@ -743,9 +771,11 @@ export default function App() {
       dueDate.setDate(startDate.getDate() + (freq * i));
       dueDate.setHours(0, 0, 0, 0);
       
-      let amountDue = quotaAmount;
+      const currentQuotaAmount = (hasCustomLast && i === totalInst) ? customLastAmount : quotaAmount;
+      let amountDue = currentQuotaAmount;
+      
       if (totalPaid > 0) {
-        const paymentApplied = Math.min(totalPaid, quotaAmount);
+        const paymentApplied = Math.min(totalPaid, currentQuotaAmount);
         amountDue -= paymentApplied;
         totalPaid -= paymentApplied;
       }
@@ -761,7 +791,7 @@ export default function App() {
         const diffDaysOverdue = Math.floor(diffTimeOverdue / (1000 * 60 * 60 * 24));
         if (diffDaysOverdue > 0) {
           const moraRateDaily = 0.05; // 5% daily as per contract
-          moraAmount = quotaAmount * moraRateDaily * diffDaysOverdue;
+          moraAmount = currentQuotaAmount * moraRateDaily * diffDaysOverdue;
           status = 'MORA';
         }
       }
@@ -770,7 +800,7 @@ export default function App() {
         num: i, 
         date: dueDate.toLocaleDateString('es-DO', {day: '2-digit', month: 'short', year: 'numeric'}), 
         timestamp: dueDate.getTime(),
-        amount: quotaAmount, // Monto FIJO acordado
+        amount: currentQuotaAmount, // Monto pactado para esta cuota
         amountDue: Math.max(0, amountDue),
         mora: moraAmount,
         status: status
@@ -792,10 +822,17 @@ export default function App() {
     if (inst > 5000) return setFormError("Máximo 5000 cuotas permitidas.");
 
     let total = 0;
+    const hasCustomLast = newLoanForm.hasCustomLastInstallment;
+    const customLastAmount = parseFloat(newLoanForm.customLastInstallment) || 0;
+
     if (newLoanForm.calcMethod === 'fija') {
       const fixed = parseFloat(newLoanForm.fixedQuota);
       if (isNaN(fixed) || fixed <= 0) return setFormError("Ingrese un monto de cuota válido.");
-      total = fixed * inst;
+      if (hasCustomLast && inst > 1) {
+        total = (fixed * (inst - 1)) + customLastAmount;
+      } else {
+        total = fixed * inst;
+      }
     } else {
       const rate = parseFloat(newLoanForm.interestRate);
       if (isNaN(rate) || rate < 0) return setFormError("Ingrese una tasa de interés válida.");
@@ -824,7 +861,9 @@ export default function App() {
         freqDays: parseInt(newLoanForm.freqDays), 
         installments: inst,
         interestRate: newLoanForm.calcMethod === 'interes' ? parseFloat(newLoanForm.interestRate) : null,
-        fixedQuota: newLoanForm.calcMethod === 'fija' ? parseFloat(newLoanForm.fixedQuota) : null
+        fixedQuota: newLoanForm.calcMethod === 'fija' ? parseFloat(newLoanForm.fixedQuota) : null,
+        hasCustomLastInstallment: hasCustomLast,
+        customLastInstallment: hasCustomLast ? customLastAmount : null
       };
 
       await addDoc(collection(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'loans'), loanData);
@@ -836,7 +875,10 @@ export default function App() {
       });
 
       closeAllModals();
-      setNewLoanForm({ client: '', phone: '', idNumber: '', address: '', workplace: '', calcMethod: 'interes', capital: '', interestRate: '', fixedQuota: '', installments: '', freqDays: '15' });
+      setNewLoanForm({ 
+        client: '', phone: '', idNumber: '', address: '', workplace: '', calcMethod: 'interes', capital: '', interestRate: '', fixedQuota: '', installments: '', freqDays: '15',
+        hasCustomLastInstallment: false, customLastInstallment: ''
+      });
       setSystemMessage("✅ Préstamo creado y capital descontado de caja.");
     } catch (err) { 
       console.error(err);
@@ -1196,6 +1238,8 @@ export default function App() {
       const debt = currentLoan.debt || 1; // Evitar división por cero
       const newProgress = Math.round(((debt - parsedRemaining) / debt) * 100);
       const parsedFixedQuota = editForm.fixedQuota ? parseFloat(editForm.fixedQuota) : null;
+      const hasCustomLast = editForm.hasCustomLastInstallment;
+      const customLastAmount = editForm.customLastInstallment ? parseFloat(editForm.customLastInstallment) : null;
 
       const updateFields = {
         client: editForm.client.trim(),
@@ -1206,6 +1250,8 @@ export default function App() {
         status: editForm.status,
         remaining: parsedRemaining,
         fixedQuota: parsedFixedQuota,
+        hasCustomLastInstallment: hasCustomLast,
+        customLastInstallment: hasCustomLast ? customLastAmount : null,
         progress: Math.max(0, Math.min(100, newProgress))
       };
 
@@ -1643,7 +1689,9 @@ export default function App() {
                           workplace: l.workplace || "",
                           remaining: l.remaining.toString(),
                           fixedQuota: l.fixedQuota ? l.fixedQuota.toString() : "",
-                          status: l.status
+                          status: l.status,
+                          hasCustomLastInstallment: !!l.hasCustomLastInstallment,
+                          customLastInstallment: l.customLastInstallment ? l.customLastInstallment.toString() : ""
                         });
                         setCurrentLoan(l);
                         setShowEditModal(true);
@@ -2080,6 +2128,50 @@ export default function App() {
                       </select>
                     </div>
                   </div>
+
+                  <div className="md:col-span-2 flex flex-col gap-4 p-4 bg-brand-primary/5 rounded-2xl border border-brand-primary/10 transition-all">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className={`w-10 h-10 rounded-full flex items-center justify-center transition-all ${newLoanForm.hasCustomLastInstallment ? 'bg-brand-primary text-white shadow-lg' : 'bg-brand-surface text-brand-text/20'}`}>
+                          <Check className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <p className="text-[10px] font-black text-brand-text uppercase tracking-tight">Última Cuota Diferente</p>
+                          <p className="text-[8px] font-black text-brand-text/30 uppercase tracking-widest">Configurar monto especial para el pago final</p>
+                        </div>
+                      </div>
+                      <button 
+                        type="button"
+                        onClick={() => setNewLoanForm(prev => ({...prev, hasCustomLastInstallment: !prev.hasCustomLastInstallment}))}
+                        className={`w-12 h-6 rounded-full transition-all relative ${newLoanForm.hasCustomLastInstallment ? 'bg-brand-primary shadow-inner' : 'bg-brand-text/10'}`}
+                      >
+                        <div className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-all shadow-sm ${newLoanForm.hasCustomLastInstallment ? 'left-7' : 'left-1'}`} />
+                      </button>
+                    </div>
+
+                    <AnimatePresence>
+                      {newLoanForm.hasCustomLastInstallment && (
+                        <motion.div 
+                          initial={{ height: 0, opacity: 0 }}
+                          animate={{ height: 'auto', opacity: 1 }}
+                          exit={{ height: 0, opacity: 0 }}
+                          className="overflow-hidden"
+                        >
+                          <div className="pt-4 border-t border-brand-primary/10">
+                            <label className="block text-[10px] font-black text-brand-primary uppercase tracking-widest mb-2 px-1">Monto Última Cuota ($)</label>
+                            <input 
+                              type="number"
+                              required={newLoanForm.hasCustomLastInstallment}
+                              value={newLoanForm.customLastInstallment}
+                              onChange={(e) => setNewLoanForm({...newLoanForm, customLastInstallment: e.target.value})}
+                              className="w-full bg-brand-surface border-2 border-brand-primary/30 p-4 rounded-xl font-black text-lg text-brand-text focus:border-brand-primary outline-none shadow-sm font-mono"
+                              placeholder="Ej: 1350"
+                            />
+                          </div>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </div>
                 </div>
 
                 {formError && <p className="text-brand-red text-[10px] font-black uppercase text-center bg-brand-red/5 py-4 rounded-xl border border-brand-red/10">{formError}</p>}
@@ -2197,6 +2289,50 @@ export default function App() {
                   </select>
                 </div>
 
+                <div className="md:col-span-2 flex flex-col gap-4 p-4 bg-brand-primary/5 rounded-2xl border border-brand-primary/10 transition-all mt-2">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className={`w-10 h-10 rounded-full flex items-center justify-center transition-all ${editForm.hasCustomLastInstallment ? 'bg-brand-primary text-white shadow-lg' : 'bg-brand-surface text-brand-text/20'}`}>
+                        <Check className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <p className="text-[10px] font-black text-brand-text uppercase tracking-tight">Última Cuota Diferente</p>
+                        <p className="text-[8px] font-black text-brand-text/30 uppercase tracking-widest">Configurar monto especial para el pago final</p>
+                      </div>
+                    </div>
+                    <button 
+                      type="button"
+                      onClick={() => setEditForm(prev => ({...prev, hasCustomLastInstallment: !prev.hasCustomLastInstallment}))}
+                      className={`w-12 h-6 rounded-full transition-all relative ${editForm.hasCustomLastInstallment ? 'bg-brand-primary shadow-inner' : 'bg-brand-text/10'}`}
+                    >
+                      <div className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-all shadow-sm ${editForm.hasCustomLastInstallment ? 'left-7' : 'left-1'}`} />
+                    </button>
+                  </div>
+
+                  <AnimatePresence>
+                    {editForm.hasCustomLastInstallment && (
+                      <motion.div 
+                        initial={{ height: 0, opacity: 0 }}
+                        animate={{ height: 'auto', opacity: 1 }}
+                        exit={{ height: 0, opacity: 0 }}
+                        className="overflow-hidden"
+                      >
+                        <div className="pt-4 border-t border-brand-primary/10">
+                          <label className="block text-[10px] font-black text-brand-primary uppercase tracking-widest mb-2 px-1">Monto Última Cuota ($)</label>
+                          <input 
+                            type="number"
+                            required={editForm.hasCustomLastInstallment}
+                            value={editForm.customLastInstallment}
+                            onChange={(e) => setEditForm({...editForm, customLastInstallment: e.target.value})}
+                            className="w-full bg-brand-surface border-2 border-brand-primary/30 p-4 rounded-xl font-black text-lg text-brand-text focus:border-brand-primary outline-none shadow-sm font-mono"
+                            placeholder="Ej: 1350"
+                          />
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+
                 <div className="md:col-span-2 pt-4 flex flex-col gap-3">
                   <button 
                     type="submit"
@@ -2267,14 +2403,18 @@ export default function App() {
                   </div>
 
                   <div className="space-y-4 text-sm">
-                    <p>
+                    <p className="text-sm">
                       Me comprometo a pagar la suma total adeudada de <span className="font-black">
-                        {formatMoney((currentLoan.fixedQuota && currentLoan.fixedQuota > 0) ? (currentLoan.fixedQuota * currentLoan.installments) : currentLoan.debt)}
+                        {formatMoney(currentLoan.debt)}
                       </span>, 
                       incluyendo los intereses generados, mediante un plan de 
-                      <span className="font-bold"> {currentLoan.installments} cuotas</span> de 
-                      <span className="font-bold"> {formatMoney(currentLoan.fixedQuota || (currentLoan.debt / currentLoan.installments))}</span>, 
-                      con una frecuencia de pago cada <span className="font-bold">{currentLoan.freqDays} días</span>.
+                      <span className="font-bold"> {currentLoan.installments} cuotas</span> 
+                      {currentLoan.hasCustomLastInstallment ? (
+                        <span> donde las cuotas iniciales son de <span className="font-bold">{formatMoney(currentLoan.fixedQuota || ((currentLoan.debt - (currentLoan.customLastInstallment || 0)) / (currentLoan.installments - 1)))}</span> y una última cuota final de <span className="font-bold">{formatMoney(currentLoan.customLastInstallment)}</span></span>
+                      ) : (
+                        <span> de <span className="font-bold">{formatMoney(currentLoan.fixedQuota || (currentLoan.debt / currentLoan.installments))}</span></span>
+                      )}
+                      , con una frecuencia de pago cada <span className="font-bold">{currentLoan.freqDays} días</span>.
                     </p>
 
                     <div className="mt-8 border border-slate-200 rounded-xl overflow-hidden print:border-slate-400">

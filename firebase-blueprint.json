@@ -20,6 +20,8 @@
         "installments": { "type": "number", "description": "Total number of installments" },
         "interestRate": { "type": "number", "description": "Interest rate percentage" },
         "fixedQuota": { "type": "number", "description": "Fixed installment amount" },
+        "hasCustomLastInstallment": { "type": "boolean", "description": "If the last installment has a different amount" },
+        "customLastInstallment": { "type": "number", "description": "Custom amount for the last installment" },
         "createdAt": { "type": "string", "format": "date-time", "description": "Creation timestamp" }
       },
       "required": ["client", "date", "debt", "remaining", "principal", "status"]

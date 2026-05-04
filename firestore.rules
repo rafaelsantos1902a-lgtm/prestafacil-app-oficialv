@@ -30,7 +30,7 @@ service cloud.firestore {
     // Pillar 2: Validation Blueprints
     function isValidLoan(data) {
       let requiredFields = ['client', 'date', 'debt', 'remaining', 'principal', 'status'];
-      let optionalFields = ['phone', 'idNumber', 'address', 'workplace', 'interestRate', 'fixedQuota', 'progress', 'createdAt', 'updatedAt', 'freqDays', 'installments'];
+      let optionalFields = ['phone', 'idNumber', 'address', 'workplace', 'interestRate', 'fixedQuota', 'progress', 'createdAt', 'updatedAt', 'freqDays', 'installments', 'hasCustomLastInstallment', 'customLastInstallment'];
       return data.keys().hasAll(requiredFields)
         && data.keys().size() <= (requiredFields.size() + optionalFields.size())
         && data.client is string && data.client.size() <= 120
@@ -38,7 +38,9 @@ service cloud.firestore {
         && data.debt is number
         && data.remaining is number
         && data.principal is number
-        && data.status in ['ACTIVO', 'PAGADO', 'RENOVADO', 'MORA'];
+        && data.status in ['ACTIVO', 'PAGADO', 'RENOVADO', 'MORA']
+        && (!data.has('hasCustomLastInstallment') || data.hasCustomLastInstallment is bool)
+        && (!data.has('customLastInstallment') || data.customLastInstallment == null || data.customLastInstallment is number);
     }
 
     function isValidTransaction(data) {
@@ -69,7 +71,7 @@ service cloud.firestore {
           && isValidLoan(incoming())
           && (
             // Action: Edit Profile
-            (incoming().diff(existing()).affectedKeys().hasOnly(['client', 'phone', 'idNumber', 'address', 'workplace', 'status', 'remaining', 'progress', 'interestRate', 'fixedQuota', 'updatedAt', 'freqDays', 'installments'])) ||
+            (incoming().diff(existing()).affectedKeys().hasOnly(['client', 'phone', 'idNumber', 'address', 'workplace', 'status', 'remaining', 'progress', 'interestRate', 'fixedQuota', 'updatedAt', 'freqDays', 'installments', 'hasCustomLastInstallment', 'customLastInstallment'])) ||
             // Action: Process Payment / Reversal
             (incoming().diff(existing()).affectedKeys().hasOnly(['remaining', 'progress', 'status', 'updatedAt'])) ||
             // Action: Renew

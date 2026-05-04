@@ -51,12 +51,18 @@
     color-scheme: light !important;
   }
 
-  /* Force standard colors for common Tailwind classes to avoid oklch parsing errors in PDF libraries */
+  /* Force standard colors for common Tailwind classes to avoid oklch/oklab parsing errors in PDF libraries */
   .printable-area, .printable-area *, .pdf-capture-active, .pdf-capture-active * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    background-color: transparent !important;
+    color-scheme: light !important;
+    
     --tw-bg-opacity: 1 !important;
     --tw-text-opacity: 1 !important;
     --tw-border-opacity: 1 !important;
-    /* Reset common color variables to standard hex/rgb equivalents to avoid oklch parsing errors */
+    
+    /* Reset common color variables to standard hex/rgb equivalents */
     --color-slate-900: #0f172a !important;
     --color-slate-800: #1e293b !important;
     --color-slate-700: #334155 !important;
@@ -71,6 +77,14 @@
     --color-green-600: #16a34a !important;
     --tw-colors-brand-primary: #2563eb !important;
     --tw-colors-slate-900: #0f172a !important;
+
+    /* Aggressive fix for Tailwind 4 oklch/oklab defaults */
+    color: currentColor !important;
+  }
+
+  .printable-area {
+    color: #0f172a !important;
+    background-color: #ffffff !important;
   }
 
   .pdf-capture-active {
