@@ -7,7 +7,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { 
   ShieldCheck, Wallet, TrendingUp, PiggyBank, Search, Plus, 
   CheckCircle2, Calendar, FileText, Printer, X, 
-  MessageCircle, Edit, Trash2, AlertCircle, 
+  MessageCircle, Edit, Trash2, AlertCircle, Hash, BadgeCheck,
   History, ArrowDownRight, ArrowUpRight, Cloud, ListChecks, 
   Phone, Home, Briefcase, Check, Lock, Trash, Upload, Download, Database,
   MapPin, User, Moon, Sun, LogOut
@@ -15,7 +15,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { Toaster, toast } from 'sonner';
 import { jsPDF } from 'jspdf';
-import html2canvas from 'html2canvas';
+import { toPng } from 'html-to-image';
 
 import { initializeApp } from 'firebase/app';
 import { 
@@ -69,12 +69,22 @@ interface Transaction {
   clientName?: string;
 }
 
+interface Client {
+  id: string;
+  name: string;
+  phone: string;
+  idNumber?: string;
+  address?: string;
+  workplace?: string;
+}
+
 export default function App() {
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [pinInput, setPinInput] = useState('');
   const [loans, setLoans] = useState<Loan[]>([]);
+  const [clients, setClients] = useState<Client[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [activeTab, setActiveTab] = useState<'activos' | 'historial'>('activos');
   const [isDarkMode, setIsDarkMode] = useState(() => {
@@ -124,8 +134,9 @@ export default function App() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [renewForm, setRenewForm] = useState({ 
-    capital: '', calcMethod: 'interes', interestRate: '', fixedQuota: '', installments: '',
-    hasCustomLastInstallment: false, customLastInstallment: ''
+    capital: '', calcMethod: 'interes' as 'interes' | 'fija', interestRate: '', fixedQuota: '', installments: '',
+    hasCustomLastInstallment: false, customLastInstallment: '',
+    freqDays: '30'
   });
   const [cashForm, setCashForm] = useState({ type: 'INYECCION' as 'INYECCION' | 'RETIRO', amount: '', concept: '' });
 
@@ -228,6 +239,11 @@ export default function App() {
       setLoans(s.docs.map(d => ({ id: d.id, ...d.data() } as Loan)));
     }, () => setAuthError("Error al sincronizar préstamos."));
 
+    const clientsRef = collection(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'clients');
+    const unsubClients = onSnapshot(clientsRef, (s) => {
+      setClients(s.docs.map(d => ({ id: d.id, ...d.data() } as Client)));
+    }, () => console.error("Error al sincronizar clientes."));
+
     const transRef = collection(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'transactions');
     const unsubTrans = onSnapshot(query(transRef, orderBy('date', 'desc')), (s) => {
       setTransactions(s.docs.map(d => ({ id: d.id, ...d.data() } as Transaction)));
@@ -278,13 +294,34 @@ export default function App() {
   }, [transactions, loans]);
 
   const uniqueClients = useMemo(() => {
-    const seen = new Set();
-    return loans.filter(l => {
-      const duplicate = seen.has(l.client);
-      seen.add(l.client);
-      return !duplicate;
+    // Merge clients from the clients collection with any found in active loans (fallback)
+    const clientMap = new Map();
+    
+    clients.forEach(c => {
+      clientMap.set(c.name.toLowerCase(), {
+        name: c.name,
+        phone: c.phone,
+        idNumber: c.idNumber,
+        address: c.address,
+        workplace: c.workplace
+      });
     });
-  }, [loans]);
+
+    loans.forEach(l => {
+      const nameKey = l.client.toLowerCase();
+      if (!clientMap.has(nameKey)) {
+        clientMap.set(nameKey, {
+          name: l.client,
+          phone: l.phone,
+          idNumber: l.idNumber,
+          address: l.address,
+          workplace: l.workplace
+        });
+      }
+    });
+
+    return Array.from(clientMap.values());
+  }, [clients, loans]);
 
   const [showGrowthModal, setShowGrowthModal] = useState(false);
   
@@ -672,7 +709,7 @@ export default function App() {
         remaining: Number(total.toFixed(2)), 
         principal: cap, 
         status: 'ACTIVO' as const, 
-        freqDays: parseInt(newLoanForm.freqDays), // Reuse freq from main form or add to renew
+        freqDays: parseInt(renewForm.freqDays), 
         installments: inst,
         interestRate: renewForm.calcMethod === 'interes' ? parseFloat(renewForm.interestRate) : null,
         fixedQuota: renewForm.calcMethod === 'fija' ? parseFloat(renewForm.fixedQuota) : null,
@@ -702,6 +739,16 @@ export default function App() {
       }
 
       await batch.commit();
+
+      // Save client to registry
+      await saveOrUpdateClient(user.uid, {
+        name: currentLoan.client,
+        phone: currentLoan.phone,
+        idNumber: currentLoan.idNumber || '',
+        address: currentLoan.address || '',
+        workplace: currentLoan.workplace || ''
+      });
+
       setShowRenewModal(false);
       setSystemMessage(`✅ Préstamo renovado con éxito. Se entregó ${formatMoney(Math.max(0, netToDeliver))} neto.`);
       setRenewForm({ 
@@ -718,7 +765,7 @@ export default function App() {
 
 
   const handleClientNameChange = (name: string) => {
-    const existingClient = uniqueClients.find(c => c.client.toLowerCase() === name.toLowerCase());
+    const existingClient = uniqueClients.find(c => c.name.toLowerCase() === name.toLowerCase());
     setNewLoanForm(prev => ({ 
       ...prev, 
       client: name, 
@@ -727,6 +774,21 @@ export default function App() {
       address: existingClient ? (existingClient.address || '') : prev.address,
       workplace: existingClient ? (existingClient.workplace || '') : prev.workplace
     }));
+  };
+
+  const saveOrUpdateClient = async (userId: string, data: { name: string, phone: string, idNumber?: string, address?: string, workplace?: string }) => {
+    try {
+      const existing = clients.find(c => c.name.toLowerCase() === data.name.toLowerCase());
+      if (existing) {
+        const clientRef = doc(db, 'artifacts', APP_DATA_PREFIX, 'users', userId, 'clients', existing.id);
+        await updateDoc(clientRef, { ...data, updatedAt: serverTimestamp() });
+      } else {
+        const clientsRef = collection(db, 'artifacts', APP_DATA_PREFIX, 'users', userId, 'clients');
+        await addDoc(clientsRef, { ...data, createdAt: serverTimestamp() });
+      }
+    } catch (e) {
+      console.error("Error saving client:", e);
+    }
   };
 
   const calculateSchedule = (loan: Loan) => {
@@ -867,6 +929,16 @@ export default function App() {
       };
 
       await addDoc(collection(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'loans'), loanData);
+      
+      // Save client to registry
+      await saveOrUpdateClient(user.uid, {
+        name: newLoanForm.client.trim(),
+        phone: newLoanForm.phone.trim(),
+        idNumber: newLoanForm.idNumber?.trim() || '',
+        address: newLoanForm.address?.trim() || '',
+        workplace: newLoanForm.workplace?.trim() || ''
+      });
+      
       await addDoc(collection(db, 'artifacts', APP_DATA_PREFIX, 'users', user.uid, 'transactions'), { 
         type: 'RETIRO', 
         amount: cap, 
@@ -1287,162 +1359,111 @@ export default function App() {
     }
 
     const loadingToast = toast.loading("Generando PDF...");
+    const isReceipt = elementId.includes('receipt');
+    
+    // Target inner content if it's a contract to avoid capturing modal headers
+    const captureElement = !isReceipt ? (element.querySelector('.max-w-3xl') as HTMLElement || element) : element;
+
+    // Original styles to restore
+    const originalStyles = {
+      width: captureElement.style.width,
+      minWidth: captureElement.style.minWidth,
+      maxWidth: captureElement.style.maxWidth,
+      height: captureElement.style.height,
+      maxHeight: captureElement.style.maxHeight,
+      overflow: captureElement.style.overflow,
+      display: captureElement.style.display,
+      flexDirection: captureElement.style.flexDirection,
+      alignItems: captureElement.style.alignItems,
+      justifyContent: captureElement.style.justifyContent,
+      backgroundColor: captureElement.style.backgroundColor
+    };
 
     try {
-      // Aplicar clase especial para desactivar oklch y ocultar botones
-      element.classList.add('pdf-capture-active');
-      const buttons = element.querySelectorAll('.no-print');
+      captureElement.classList.add('pdf-capture-active');
+      const buttons = captureElement.querySelectorAll('.no-print');
       buttons.forEach((btn: any) => btn.style.setProperty('display', 'none', 'important'));
 
-      // Dar un pequeño respiro para que el DOM se actualice
-      await new Promise(resolve => setTimeout(resolve, 100));
+      // Use appropriate capture width for better resolution and matching UI density
+      const captureWidth = isReceipt ? 480 : 900;
+      
+      // Force capturing element to be fully expanded and consistent
+      captureElement.style.setProperty('width', `${captureWidth}px`, 'important');
+      captureElement.style.setProperty('min-width', `${captureWidth}px`, 'important');
+      captureElement.style.setProperty('max-width', 'none', 'important');
+      captureElement.style.setProperty('height', 'auto', 'important');
+      captureElement.style.setProperty('max-height', 'none', 'important');
+      captureElement.style.setProperty('overflow', 'visible', 'important');
+      captureElement.style.setProperty('display', 'flex', 'important');
+      captureElement.style.setProperty('flex-direction', 'column', 'important');
+      captureElement.style.setProperty('align-items', 'stretch', 'important');
+      captureElement.style.setProperty('background-color', '#ffffff', 'important');
 
-      const canvas = await html2canvas(element, {
-        scale: 2,
-        useCORS: true,
-        logging: false,
+      // Enhanced wait for rendering (fonts, layouts)
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
+      const dataUrl = await toPng(captureElement, {
+        quality: 1,
+        pixelRatio: 3, // Higher quality for text
         backgroundColor: '#ffffff',
-        windowWidth: element.scrollWidth,
-        windowHeight: element.scrollHeight,
-        onclone: (clonedDoc) => {
-          // 1. Force light mode and sanitize basic colors
-          const root = clonedDoc.documentElement;
-          root.classList.remove('dark');
-          root.style.colorScheme = 'light';
-          clonedDoc.body.style.backgroundColor = '#ffffff';
-          clonedDoc.body.style.color = '#000000';
-          
-          // 2. Brutal safety style to kill animations and force hex variables
-          // We include every possible variable that might be using oklch/oklab
-          const safetyStyle = clonedDoc.createElement('style');
-          safetyStyle.innerHTML = `
-            * {
-              transition: none !important;
-              animation: none !important;
-              transition-duration: 0s !important;
-              transition-property: none !important;
-            }
-            :root {
-              --bg: #ffffff !important;
-              --surface: #ffffff !important;
-              --card: #ffffff !important;
-              --border: #e2e8f0 !important;
-              --text: #000000 !important;
-              --text-muted: #64748b !important;
-              --text-dim: #94a3b8 !important;
-              --secondary: #f1f5f9 !important;
-              --brand-primary: #2563eb !important;
-              --brand-text: #000000 !important;
-              --brand-bg: #ffffff !important;
-              --tw-text-opacity: 1 !important;
-              --tw-bg-opacity: 1 !important;
-              --tw-border-opacity: 1 !important;
-              --color-brand-primary: #2563eb !important;
-              --color-slate-900: #0f172a !important;
-              --color-slate-800: #1e293b !important;
-              --color-slate-700: #334155 !important;
-              --color-slate-600: #475569 !important;
-              --color-slate-500: #64748b !important;
-              --tw-color-brand-primary: #2563eb !important;
-              --tw-color-brand-text: #000000 !important;
-              --tw-color-brand-bg: #ffffff !important;
-            }
-            body, .printable-area { 
-              background-color: #ffffff !important; 
-              color: #000000 !important; 
-            }
-          `;
-          clonedDoc.head.appendChild(safetyStyle);
-
-          // 3. Remove all LINK tags (external stylesheets) which might contain oklch/oklab
-          Array.from(clonedDoc.getElementsByTagName('link')).forEach(link => {
-            if (link.rel === 'stylesheet') {
-              link.remove();
-            }
-          });
-
-          // 4. Regex replacement in ALL internal style tags
-          // We use a broader regex to catch oklch/oklab even with complex parameters
-          Array.from(clonedDoc.getElementsByTagName('style')).forEach(tag => {
-            try {
-              let cssText = tag.innerHTML;
-              // Very aggressive replacement: find anything starting with oklch( or oklab( and matching until the closing paren
-              // We handle potential nesting with a slightly smarter (though not perfect) negative lookahead if needed
-              // or just match everything inside parens.
-              cssText = cssText.replace(/oklch\s*\([^)]+\)/gi, '#121212');
-              cssText = cssText.replace(/oklab\s*\([^)]+\)/gi, '#121212');
-              // Also catch the Tailwind 4 / opacity patterns: oklch(...) / 0.5
-              cssText = cssText.replace(/(oklch|oklab)\s*\([^)]+\)\s*\/\s*[0-9.]+/gi, '#121212');
-              tag.innerHTML = cssText;
-            } catch (e) {
-              console.warn("Style sanitization failed for a tag", e);
-            }
-          });
-
-          // 5. Force standard colors on the element and its children
-          const el = clonedDoc.getElementById(elementId);
-          if (el) {
-            el.style.setProperty('background-color', '#ffffff', 'important');
-            el.style.setProperty('color', '#000000', 'important');
-            
-            el.querySelectorAll('*').forEach((child: any) => {
-              if (child.style) {
-                child.style.setProperty('transition', 'none', 'important');
-                child.style.setProperty('animation', 'none', 'important');
-                
-                // Check all style properties
-                for (let i = 0; i < child.style.length; i++) {
-                  const prop = child.style[i];
-                  const val = child.style.getPropertyValue(prop);
-                  if (val && (val.toLowerCase().includes('oklch') || val.toLowerCase().includes('oklab'))) {
-                    // Try to map to something reasonable or just force black
-                    let fallback = '#333333';
-                    if (prop.includes('background')) fallback = '#ffffff';
-                    child.style.setProperty(prop, fallback, 'important');
-                  }
-                }
-              }
-              // Direct Tag overrides for typical text containers
-              if (['P', 'SPAN', 'H1', 'H2', 'H3', 'H4', 'H5', 'TD', 'TH', 'B', 'STRONG'].includes(child.tagName)) {
-                child.style.setProperty('color', '#000000', 'important');
-              }
-            });
-          }
+        width: captureWidth,
+        style: {
+          transform: 'none',
+          borderRadius: '0',
+          boxShadow: 'none',
+          padding: '0px', 
+          margin: '0',
+          maxWidth: 'none',
+          width: `${captureWidth}px`,
+          minWidth: `${captureWidth}px`,
+          height: 'auto',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'stretch',
+          justifyContent: 'flex-start',
+          boxSizing: 'border-box'
         }
       });
 
-      const imgData = canvas.toDataURL('image/jpeg', 0.95);
+      // PDF dimensions
+      const pdfPageWidth = isReceipt ? 120 : 210; // Standard A4 for contracts/reports
+      const sideMargin = isReceipt ? 10 : 20; // Correct professional margins
+      const contentWidth = pdfPageWidth - (sideMargin * 2);
+      
+      const img = new Image();
+      img.src = dataUrl;
+      await new Promise((resolve) => {
+        img.onload = resolve;
+      });
+      
+      const pdfHeight = (img.height * contentWidth) / img.width;
+      // Page height is dynamic to fit all content
+      const pdfPageHeight = pdfHeight + 20; 
+
       const pdf = new jsPDF({
-        orientation: 'portrait',
-        unit: 'px',
-        format: [canvas.width, canvas.height]
+        orientation: 'p',
+        unit: 'mm',
+        format: [pdfPageWidth, pdfPageHeight]
       });
 
-      pdf.addImage(imgData, 'JPEG', 0, 0, canvas.width, canvas.height);
+      // Center horizontally on the page
+      const finalX = (pdfPageWidth - contentWidth) / 2;
+      pdf.addImage(dataUrl, 'PNG', finalX, 10, contentWidth, pdfHeight);
       pdf.save(`${filename}.pdf`);
-
-      // Restaurar estado
-      element.classList.remove('pdf-capture-active');
+      
+      toast.success("PDF generado con éxito", { id: loadingToast });
+    } catch (error) {
+      console.error("Error generating PDF:", error);
+      toast.error("Error al generar el PDF");
+    } finally {
+      captureElement.classList.remove('pdf-capture-active');
+      const buttons = captureElement.querySelectorAll('.no-print');
       buttons.forEach((btn: any) => btn.style.display = '');
       
-      toast.dismiss(loadingToast);
-      toast.success("PDF generado correctamente");
-    } catch (err) {
-      console.error("Error al generar PDF:", err);
-      toast.dismiss(loadingToast);
-      
-      // Fallback: If html2canvas fails, try to use just the window.print() but styled for PDF
-      toast.error("Error al generar el PDF. Intentando método alternativo...");
-      const element = document.getElementById(elementId);
-      if (element) {
-        element.classList.remove('pdf-capture-active');
-        const buttons = element.querySelectorAll('.no-print');
-        buttons.forEach((btn: any) => btn.style.display = '');
-      }
-      
-      setTimeout(() => {
-        window.print();
-      }, 500);
+      // Restore original styles
+      Object.entries(originalStyles).forEach(([prop, val]) => {
+        (captureElement.style as any)[prop] = val;
+      });
     }
   };
 
@@ -1733,6 +1754,23 @@ export default function App() {
                     onClick={() => { setCurrentLoan(l); setShowPaymentModal(true); } }
                     className="bg-brand-primary text-white py-3 rounded-xl font-black text-[9px] uppercase shadow-lg shadow-brand-primary/20 hover:brightness-110 transition-all"
                    >RECAUDAR</button>
+                   <button 
+                    onClick={() => { 
+                      setCurrentLoan(l); 
+                      setRenewForm({
+                        capital: '',
+                        calcMethod: 'interes',
+                        interestRate: l.interestRate?.toString() || '',
+                        fixedQuota: l.fixedQuota?.toString() || '',
+                        installments: l.installments?.toString() || '',
+                        hasCustomLastInstallment: !!l.hasCustomLastInstallment,
+                        customLastInstallment: l.customLastInstallment?.toString() || '',
+                        freqDays: l.freqDays?.toString() || '30'
+                      });
+                      setShowRenewModal(true); 
+                    }}
+                    className="bg-brand-green text-white py-3 rounded-xl font-black text-[9px] uppercase shadow-lg shadow-brand-green/20 hover:brightness-110 transition-all"
+                   >RENOVAR</button>
                   <button 
                     onClick={() => { setCurrentLoan(l); setShowScheduleModal(true); } }
                     className="bg-brand-secondary text-brand-text/60 py-3 rounded-xl font-black text-[9px] border border-brand-border uppercase hover:bg-brand-secondary/80 transition-all"
@@ -1837,6 +1875,177 @@ export default function App() {
       </AnimatePresence>
 
       <AnimatePresence>
+        {/* Modal Renovar */}
+        {showRenewModal && currentLoan && (
+          <div className="fixed inset-0 bg-brand-bg/95 z-50 flex items-center justify-center p-0 md:p-4 backdrop-blur-md overflow-y-auto">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.98, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.98, y: 20 }}
+              className="bg-brand-surface w-full h-full md:h-auto md:max-w-xl md:rounded-3xl shadow-2xl overflow-hidden flex flex-col border border-brand-border"
+            >
+              <div className="p-6 md:p-8 border-b border-brand-border flex justify-between items-center bg-brand-green/10">
+                <div className="flex items-center gap-4">
+                  <div className="bg-brand-green/20 p-3 rounded-2xl border border-brand-green/30">
+                    <History className="w-6 h-6 text-brand-green" />
+                  </div>
+                  <div>
+                    <h2 className="text-xl font-black text-brand-text uppercase tracking-tight">RENOVAR PRÉSTAMO</h2>
+                    <p className="text-[10px] font-black text-brand-text/30 uppercase tracking-widest">{currentLoan.client}</p>
+                  </div>
+                </div>
+                <button onClick={(e) => closeAllModals(e)} className="text-brand-text/20 hover:text-brand-text p-2"><X className="w-6 h-6" /></button>
+              </div>
+
+              <form onSubmit={handleRenewLoan} className="p-6 md:p-10 space-y-6 flex-1 overflow-y-auto bg-brand-bg/30">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 bg-brand-surface p-6 rounded-2xl border border-brand-border shadow-sm">
+                  <div className="text-center p-4 bg-brand-red/5 rounded-xl border border-brand-red/10">
+                    <p className="text-[8px] font-black text-brand-red/60 uppercase tracking-widest mb-1">Saldo que se Cancela</p>
+                    <p className="text-xl font-black text-brand-red font-mono">{formatMoney(currentLoan.remaining)}</p>
+                  </div>
+                  <div className="text-center p-4 bg-brand-green/5 rounded-xl border border-brand-green/10">
+                    <p className="text-[8px] font-black text-brand-green/60 uppercase tracking-widest mb-1">A Entregar Neto</p>
+                    <p className="text-xl font-black text-brand-green font-mono">
+                      {formatMoney(Math.max(0, (parseFloat(renewForm.capital) || 0) - currentLoan.remaining))}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-6">
+                  <div>
+                    <label className="block text-[10px] font-black text-brand-primary uppercase tracking-widest mb-2 px-1">Nuevo Capital Solicitado ($)</label>
+                    <input 
+                      type="number"
+                      required 
+                      autoFocus
+                      value={renewForm.capital}
+                      onChange={(e) => setRenewForm({...renewForm, capital: e.target.value})}
+                      className="w-full bg-brand-surface border-2 border-brand-primary/20 p-5 rounded-2xl font-black text-2xl text-brand-text focus:border-brand-primary outline-none shadow-xl shadow-brand-primary/5 font-mono"
+                      placeholder="Ej: 10000"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div>
+                      <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2 px-1">Método de Cálculo</label>
+                      <div className="flex gap-2">
+                        <button 
+                          type="button"
+                          onClick={() => setRenewForm({...renewForm, calcMethod: 'interes'})}
+                          className={`flex-1 py-3 rounded-xl font-black text-[9px] uppercase border transition-all ${renewForm.calcMethod === 'interes' ? 'bg-brand-primary text-white border-brand-primary shadow-lg shadow-brand-primary/20' : 'bg-brand-surface text-brand-text/40 border-brand-border'}`}
+                        >Por Interés (%)</button>
+                        <button 
+                          type="button"
+                          onClick={() => setRenewForm({...renewForm, calcMethod: 'fija'})}
+                          className={`flex-1 py-3 rounded-xl font-black text-[9px] uppercase border transition-all ${renewForm.calcMethod === 'fija' ? 'bg-brand-primary text-white border-brand-primary shadow-lg shadow-brand-primary/20' : 'bg-brand-surface text-brand-text/40 border-brand-border'}`}
+                        >Cuota Fija ($)</button>
+                      </div>
+                    </div>
+                    {renewForm.calcMethod === 'interes' ? (
+                      <div>
+                        <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2 px-1">Tasa Interés (%)</label>
+                        <input 
+                          type="number"
+                          required 
+                          value={renewForm.interestRate}
+                          onChange={(e) => setRenewForm({...renewForm, interestRate: e.target.value})}
+                          className="w-full bg-brand-surface border border-brand-border p-4 rounded-xl font-black text-lg text-brand-text focus:border-brand-primary outline-none font-mono"
+                          placeholder="20"
+                        />
+                      </div>
+                    ) : (
+                      <div>
+                        <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2 px-1">Monto Cuota ($)</label>
+                        <input 
+                          type="number"
+                          required 
+                          value={renewForm.fixedQuota}
+                          onChange={(e) => setRenewForm({...renewForm, fixedQuota: e.target.value})}
+                          className="w-full bg-brand-surface border border-brand-border p-4 rounded-xl font-black text-lg text-brand-text focus:border-brand-primary outline-none font-mono"
+                          placeholder="2700"
+                        />
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <div>
+                      <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2 px-1">Núm. Cuotas</label>
+                      <input 
+                        type="number"
+                        required 
+                        value={renewForm.installments}
+                        onChange={(e) => setRenewForm({...renewForm, installments: e.target.value})}
+                        className="w-full bg-brand-surface border border-brand-border p-4 rounded-xl font-black text-lg text-brand-text focus:border-brand-primary outline-none font-mono"
+                        placeholder="8"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2 px-1">Frecuencia (días)</label>
+                      <input 
+                        type="number"
+                        required 
+                        value={renewForm.freqDays}
+                        onChange={(e) => setRenewForm({...renewForm, freqDays: e.target.value})}
+                        className="w-full bg-brand-surface border border-brand-border p-4 rounded-xl font-black text-lg text-brand-text focus:border-brand-primary outline-none font-mono"
+                        placeholder="30"
+                      />
+                    </div>
+                    
+                    <div className="flex flex-col gap-4 p-4 bg-brand-primary/5 rounded-2xl border border-brand-primary/10 transition-all self-end">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <Check className={`w-3 h-3 ${renewForm.hasCustomLastInstallment ? 'text-brand-primary' : 'text-brand-text/20'}`} />
+                          <p className="text-[9px] font-black text-brand-text uppercase tracking-tight">Última Cuota Diferente</p>
+                        </div>
+                        <button 
+                          type="button"
+                          onClick={() => setRenewForm(prev => ({...prev, hasCustomLastInstallment: !prev.hasCustomLastInstallment}))}
+                          className={`w-10 h-5 rounded-full transition-all relative ${renewForm.hasCustomLastInstallment ? 'bg-brand-primary shadow-inner' : 'bg-brand-text/10'}`}
+                        >
+                          <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all shadow-sm ${renewForm.hasCustomLastInstallment ? 'left-5.5' : 'left-0.5'}`} />
+                        </button>
+                      </div>
+                      
+                      <AnimatePresence>
+                        {renewForm.hasCustomLastInstallment && (
+                          <motion.div 
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: 'auto', opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            className="overflow-hidden"
+                          >
+                            <input 
+                              type="number"
+                              required={renewForm.hasCustomLastInstallment}
+                              value={renewForm.customLastInstallment}
+                              onChange={(e) => setRenewForm({...renewForm, customLastInstallment: e.target.value})}
+                              className="w-full bg-brand-surface border border-brand-primary/30 p-2 rounded-lg font-black text-sm text-brand-text focus:border-brand-primary outline-none shadow-sm font-mono mt-1"
+                              placeholder="Monto final"
+                            />
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="pt-6">
+                  <button 
+                    type="submit"
+                    disabled={isSubmitting}
+                    className={`w-full bg-brand-green text-white py-5 rounded-2xl font-black uppercase text-[10px] tracking-widest shadow-xl shadow-brand-green/20 transition-all ${isSubmitting ? 'opacity-50' : 'hover:brightness-110 active:scale-95'}`}
+                  >
+                    {isSubmitting ? 'PROCESANDO...' : 'CONFIRMAR RENOVACIÓN'}
+                  </button>
+                  {formError && <p className="mt-4 text-brand-red text-[10px] font-black uppercase text-center">{formError}</p>}
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+
         {/* Modal Recibo Digital */}
         {showReceiptModal && currentLoan && (
           <div className="fixed inset-0 bg-brand-bg/98 z-[60] flex items-center justify-center p-0 md:p-4 backdrop-blur-xl printable-area">
@@ -1847,40 +2056,58 @@ export default function App() {
               exit={{ opacity: 0, scale: 0.9, y: 50 }}
               className="bg-white text-slate-900 w-full h-full md:h-auto md:max-w-sm md:rounded-[2.5rem] shadow-[0_0_100px_rgba(0,0,0,0.5)] overflow-hidden flex flex-col relative print:shadow-none print:border-none"
             >
-              <button onClick={(e) => closeAllModals(e)} className="absolute top-8 right-8 text-slate-300 hover:text-brand-primary transition-all p-2 z-10 no-print"><X className="w-8 h-8" /></button>
+              <button onClick={(e) => closeAllModals(e)} className="absolute top-8 right-8 text-slate-300 hover:text-brand-primary transition-all p-2 z-10 no-print hover:rotate-90"><X className="w-8 h-8" /></button>
               
-              <div className="p-8 pb-4 text-center">
-                 <div className="w-20 h-20 bg-brand-primary/10 rounded-full flex items-center justify-center mx-auto mb-6">
-                    <CheckCircle2 className="w-10 h-10 text-brand-primary" />
+              <div className="p-10 pb-4 text-center">
+                 <p className="text-[9px] font-black text-sky-500 uppercase tracking-[0.4em] mb-6 opacity-80">PRESTA FÁCIL</p>
+                 <div className="w-16 h-16 bg-sky-500/10 rounded-full flex items-center justify-center mx-auto mb-5">
+                    <CheckCircle2 className="w-8 h-8 text-sky-500" />
                  </div>
-                 <h2 className="text-2xl font-black tracking-tight text-slate-900 uppercase">PAGO EXITOSO</h2>
-                 <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mt-1">Transacción procesada correctamente</p>
+                 <h2 className="text-xl font-bold tracking-tight text-slate-950 uppercase mb-1">RECIBO DE TRANSACCIÓN</h2>
+                 <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest flex items-center justify-center gap-2">
+                    <Hash className="w-3 h-3 opacity-50" /> N° {(new Date().getTime() % 1000000).toString().padStart(8, '0')}
+                 </p>
               </div>
 
-              <div className="p-10 space-y-6 flex-1 overflow-y-auto">
-                 <div className="border-y-2 border-slate-100 py-8 space-y-4">
-                    <div className="flex justify-between items-center text-[10px] font-black uppercase text-slate-400 tracking-widest">
-                       <span>CLIENTE</span>
-                       <span className="text-slate-900 font-bold">{currentLoan.client}</span>
+              <div className="p-10 pt-4 space-y-8 flex-1 overflow-y-auto">
+                 <div className="border-y border-dashed border-slate-200 py-8 space-y-6">
+                    <div className="text-center">
+                       <p className="text-[9px] font-black uppercase text-slate-300 tracking-widest mb-2 px-4">CLIENTE BENEFICIARIO</p>
+                       <p className="text-slate-900 font-bold text-[17px] leading-tight break-words px-8 uppercase tracking-tight">{currentLoan.client}</p>
                     </div>
-                    <div className="flex justify-between items-center text-[10px] font-black uppercase text-slate-400 tracking-widest">
-                       <span>FORMA DE PAGO</span>
-                       <span className="text-slate-900 font-bold">EFECTIVO / CAJA</span>
-                    </div>
-                    <div className="flex justify-between items-center text-[10px] font-black uppercase text-slate-400 tracking-widest">
-                       <span>FECHA</span>
-                       <span className="text-slate-900 font-bold">{receiptDate}</span>
+                    <div className="grid grid-cols-2 gap-4 pt-4 border-t border-slate-50">
+                       <div className="text-center border-r border-slate-100 py-1">
+                          <p className="text-[9px] font-black uppercase text-slate-300 tracking-widest mb-1 px-2">MÉTODO DE PAGO</p>
+                          <p className="text-slate-900 font-bold text-[11px] tracking-tight uppercase">EFECTIVO / CAJA</p>
+                       </div>
+                       <div className="text-center py-1">
+                          <p className="text-[9px] font-black uppercase text-slate-300 tracking-widest mb-1 px-2">FECHA DE PAGO</p>
+                          <p className="text-slate-900 font-bold text-[11px] tracking-tight">{receiptDate}</p>
+                       </div>
                     </div>
                  </div>
 
-                 <div className="bg-slate-50 p-8 rounded-3xl text-center space-y-2">
-                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">MONTO PAGADO</p>
-                    <h3 className="text-5xl font-black text-brand-primary tracking-tighter">{formatMoney(lastPaidAmount)}</h3>
+                 <div className="relative group">
+                    <div className="absolute inset-0 bg-sky-500 opacity-[0.08] rounded-[2.5rem] group-hover:opacity-[0.12] transition-opacity"></div>
+                    <div className="relative bg-white border border-sky-100 p-10 rounded-[2.5rem] text-center space-y-3 shadow-sm">
+                       <p className="text-[10px] font-black text-sky-600/60 uppercase tracking-[0.2em]">MONTO TOTAL LIQUIDADO</p>
+                       <h3 className="text-5xl font-black text-slate-950 tracking-tighter">{formatMoney(lastPaidAmount)}</h3>
+                       <div className="inline-flex items-center gap-1.5 px-4 py-1.5 bg-sky-500 text-white rounded-full text-[9px] font-black uppercase tracking-widest mx-auto shadow-sm shadow-sky-500/20">
+                          <BadgeCheck className="w-3.5 h-3.5 text-white" /> TRANSACCIÓN COMPLETADA
+                       </div>
+                    </div>
                  </div>
 
-                 <div className="text-center bg-brand-primary/5 p-6 rounded-2xl border border-brand-primary/10">
-                    <p className="text-[9px] font-black text-slate-400 uppercase tracking-[0.2em] mb-1">SALDO RESTANTE</p>
-                    <p className="text-xl font-black text-brand-primary">{formatMoney(currentLoan.remaining)}</p>
+                 <div className="flex justify-between items-center bg-sky-50/50 p-6 rounded-2xl border border-sky-100/50">
+                    <div className="space-y-0.5">
+                       <p className="text-[9px] font-black text-sky-600/50 uppercase tracking-widest">SALDO ACTUAL</p>
+                       <p className="text-[8px] font-bold text-slate-400 uppercase">PENDIENTE DE PAGO</p>
+                    </div>
+                    <p className="text-2xl font-black text-slate-900">{formatMoney(currentLoan.remaining)}</p>
+                 </div>
+
+                 <div className="text-center opacity-40">
+                    <p className="text-[8px] font-bold uppercase tracking-widest text-slate-400">Gracias por su puntualidad • Este comprobante es válido como soporte de pago</p>
                  </div>
               </div>
 
@@ -1930,12 +2157,12 @@ export default function App() {
                 {/* Visualización para impresión */}
                 <div className="hidden print:block mb-8 border-b-2 border-slate-900 pb-4">
                   <h1 className="text-2xl font-black uppercase tracking-tighter text-slate-900">Plan de Pagos</h1>
-                  <div className="flex justify-between mt-4 text-[10px] font-bold uppercase text-slate-500">
-                    <div>
+                  <div className="flex justify-between mt-4 text-[10px] font-bold uppercase text-slate-500 gap-8 items-start">
+                    <div className="space-y-1">
                       <p>CLIENTE: <span className="text-slate-900">{currentLoan.client}</span></p>
                       <p>TELÉFONO: <span className="text-slate-900">{currentLoan.phone}</span></p>
                     </div>
-                    <div className="text-right">
+                    <div className="text-right shrink-0 space-y-1">
                       <p>FECHA: <span className="text-slate-900">{new Date().toLocaleDateString()}</span></p>
                       <p>ESTADO: <span className="text-slate-900">{currentLoan.status}</span></p>
                     </div>
@@ -2021,11 +2248,17 @@ export default function App() {
                     <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2 px-1">Cliente Completo</label>
                     <input 
                       required 
+                      list="clients-list"
                       value={newLoanForm.client}
-                      onChange={(e) => setNewLoanForm({...newLoanForm, client: e.target.value})}
+                      onChange={(e) => handleClientNameChange(e.target.value)}
                       className="w-full bg-brand-surface border border-brand-border p-4 rounded-xl font-bold text-brand-text focus:border-brand-primary outline-none shadow-sm transition-all"
                       placeholder="Juan Pérez..."
                     />
+                    <datalist id="clients-list">
+                      {uniqueClients.map((c, i) => (
+                        <option key={i} value={c.name} />
+                      ))}
+                    </datalist>
                   </div>
                   <div>
                     <label className="block text-[10px] font-black text-brand-text/30 uppercase tracking-widest mb-2 px-1">Teléfono</label>
@@ -2371,19 +2604,19 @@ export default function App() {
             >
               <div className="p-6 border-b border-brand-border flex justify-between items-center bg-slate-50">
                 <div className="flex items-center gap-3">
-                  <div className="bg-brand-primary/10 p-2 rounded-lg">
-                    <FileText className="w-5 h-5 text-brand-primary" />
+                  <div className="bg-sky-500/10 p-2 rounded-lg">
+                    <FileText className="w-5 h-5 text-sky-500" />
                   </div>
                   <h2 className="text-sm font-black text-slate-900 uppercase tracking-tight">Contrato Digital de Préstamo</h2>
                 </div>
                 <button onClick={(e) => closeAllModals(e)} className="text-slate-400 hover:text-slate-900 transition-colors"><X /></button>
               </div>
 
-              <div className="flex-1 overflow-y-auto p-12 bg-white text-slate-900 selection:bg-brand-primary" id="contract-view" style={{ color: '#0f172a' }}>
-                <div className="max-w-2xl mx-auto space-y-10 font-serif leading-relaxed text-justify">
-                  <div className="text-center space-y-2 border-b-2 border-doc-primary pb-6 mb-10">
-                    <h1 className="text-3xl font-black tracking-tighter uppercase">Pagaré Notarial</h1>
-                    <p className="text-[10px] font-black tracking-[0.4em] text-doc-secondary uppercase">PrestaFácil - Servicios Financieros</p>
+              <div className="flex-1 overflow-y-auto p-12 bg-white text-slate-900 selection:bg-sky-500" id="contract-view" style={{ color: '#0f172a' }}>
+                <div className="max-w-3xl mx-auto space-y-10 font-serif leading-relaxed text-justify">
+                  <div className="text-center space-y-2 border-b-2 border-slate-100 pb-6 mb-10">
+                    <h1 className="text-3xl font-black tracking-tighter uppercase text-slate-950">Pagaré Notarial</h1>
+                    <p className="text-[10px] font-black tracking-[0.4em] text-sky-500 uppercase font-sans">Presta Fácil • Servicios Financieros</p>
                   </div>
 
                   <p className="text-sm">
@@ -2446,7 +2679,7 @@ export default function App() {
                     </div>
                     
                     <p className="mt-6">
-                      <span className="font-black underline">PENALIDAD POR INCUMPLIMIENTO:</span> El deudor acepta y reconoce que, en caso de retraso en el pago de cualquier cuota según la fecha establecida en el plan de pagos, se generará de forma automática un interés penal por mora equivalente al <span className="font-bold text-doc-accent">5% DIARIO</span> sobre el monto total de la deuda restante, hasta la regularización del pago.
+                      <span className="font-black underline">PENALIDAD POR INCUMPLIMIENTO:</span> El deudor acepta y reconoce que, en caso de retraso en el pago de cualquier cuota según la fecha establecida en el plan de pagos, se generará de forma automática un interés penal por mora equivalente al <span className="font-bold text-sky-600">5% DIARIO</span> sobre el monto total de la deuda restante, hasta la regularización del pago.
                     </p>
 
                     <p>
@@ -2458,20 +2691,20 @@ export default function App() {
 
                   <div className="pt-20 grid grid-cols-2 gap-20">
                     <div className="text-center">
-                      <div className="border-t-2 border-doc-primary pt-3">
+                      <div className="border-t-2 border-slate-900 pt-3">
                         <p className="font-black text-xs uppercase tracking-widest">{currentLoan.client}</p>
-                        <p className="text-[10px] text-doc-secondary font-bold mt-1">EL DEUDOR</p>
+                        <p className="text-[10px] text-slate-400 font-bold mt-1">EL DEUDOR</p>
                       </div>
                     </div>
                     <div className="text-center">
-                      <div className="border-t-2 border-doc-primary pt-3">
-                        <p className="font-black text-xs uppercase tracking-widest">PRESTAFÁCIL</p>
-                        <p className="text-[10px] text-doc-secondary font-bold mt-1">EL ACREEDOR</p>
+                      <div className="border-t-2 border-slate-900 pt-3">
+                        <p className="font-black text-xs uppercase tracking-widest">PRESTA FÁCIL</p>
+                        <p className="text-[10px] text-slate-400 font-bold mt-1">EL ACREEDOR</p>
                       </div>
                     </div>
                   </div>
 
-                  <div className="pt-10 text-[9px] text-doc-secondary text-center uppercase tracking-widest font-sans">
+                  <div className="pt-10 text-[9px] text-slate-400 text-center uppercase tracking-widest font-sans">
                     Fecha de emisión: {new Date().toLocaleDateString('es-DO', { day: '2-digit', month: 'long', year: 'numeric' })}
                   </div>
                 </div>
@@ -2479,7 +2712,7 @@ export default function App() {
 
               <div className="p-8 border-t border-brand-border bg-brand-surface flex gap-4 no-print sticky bottom-0">
                 <button 
-                  onClick={() => handleDownloadPDF('contract-pdf-content', `Contrato_${currentLoan.client.replace(/\s+/g, '_')}`)}
+                  onClick={() => handleDownloadPDF('contract-view', `Contrato_${currentLoan.client.replace(/\s+/g, '_')}`)}
                   className="flex-1 bg-slate-900 text-white py-5 rounded-2xl font-black uppercase text-[10px] tracking-widest flex items-center justify-center gap-3 hover:bg-black transition-all shadow-xl shadow-slate-900/20 active:scale-[0.98]"
                 >
                   <Download className="w-5 h-5" /> DESCARGAR CONTRATO PDF

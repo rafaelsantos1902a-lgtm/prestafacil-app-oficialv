@@ -26,6 +26,20 @@
       },
       "required": ["client", "date", "debt", "remaining", "principal", "status"]
     },
+    "Client": {
+      "title": "Client",
+      "description": "Registered client information",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "Full name" },
+        "phone": { "type": "string", "description": "Phone number" },
+        "idNumber": { "type": "string", "description": "ID number" },
+        "address": { "type": "string", "description": "Address" },
+        "workplace": { "type": "string", "description": "Workplace" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name"]
+    },
     "Transaction": {
       "title": "Transaction",
       "description": "Financial transaction (payment or withdrawal)",
@@ -43,6 +57,10 @@
     "/artifacts/prestafacil-v1/users/{userId}/loans/{loanId}": {
       "schema": "Loan",
       "description": "User's loan records"
+    },
+    "/artifacts/prestafacil-v1/users/{userId}/clients/{clientId}": {
+      "schema": "Client",
+      "description": "User's registered clients"
     },
     "/artifacts/prestafacil-v1/users/{userId}/transactions/{transactionId}": {
       "schema": "Transaction",

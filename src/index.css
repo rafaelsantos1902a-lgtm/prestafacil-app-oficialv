@@ -55,29 +55,19 @@
   .printable-area, .printable-area *, .pdf-capture-active, .pdf-capture-active * {
     -webkit-print-color-adjust: exact !important;
     print-color-adjust: exact !important;
-    background-color: transparent !important;
     color-scheme: light !important;
     
     --tw-bg-opacity: 1 !important;
     --tw-text-opacity: 1 !important;
     --tw-border-opacity: 1 !important;
     
-    /* Reset common color variables to standard hex/rgb equivalents */
-    --color-slate-900: #0f172a !important;
-    --color-slate-800: #1e293b !important;
-    --color-slate-700: #334155 !important;
-    --color-slate-600: #475569 !important;
-    --color-slate-500: #64748b !important;
+    /* Reset brand color variables to standard hex/rgb equivalents */
     --color-brand-primary: #2563eb !important;
-    --color-brand-bg: #f8fafc !important;
+    --color-brand-bg: #ffffff !important;
     --color-brand-text: #0f172a !important;
     --color-brand-border: #e2e8f0 !important;
-    --color-blue-600: #2563eb !important;
-    --color-red-600: #dc2626 !important;
-    --color-green-600: #16a34a !important;
     --tw-colors-brand-primary: #2563eb !important;
-    --tw-colors-slate-900: #0f172a !important;
-
+    
     /* Aggressive fix for Tailwind 4 oklch/oklab defaults */
     color: currentColor !important;
   }
@@ -125,11 +115,10 @@
     transform: none !important;
   }
 
-  /* Correct display for tables and inline elements */
+  /* Correct display for tables */
   .printable-area table { display: table !important; }
   .printable-area tr { display: table-row !important; }
   .printable-area td, .printable-area th { display: table-cell !important; }
-  .printable-area span, .printable-area b, .printable-area i, .printable-area strong, .printable-area p { display: inline !important; }
 
   /* 4. Force hide UI elements inside printable area */
   .no-print, 
@@ -145,3 +134,102 @@
     size: auto;
   }
 }
+
+/* Styles for capturing PDF on screen using dom-to-image-more */
+.pdf-capture-active {
+  background-color: #ffffff !important;
+  color: #000000 !important;
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
+  overflow: visible !important;
+  border-radius: 0 !important; /* Square edges for the "paper" */
+}
+
+.pdf-capture-active, 
+.pdf-capture-active [class*="overflow-y-"], 
+.pdf-capture-active [class*="overflow-x-"] {
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
+  overflow: visible !important;
+}
+
+.pdf-capture-active::-webkit-scrollbar,
+.pdf-capture-active [class*="overflow-y-"]::-webkit-scrollbar,
+.pdf-capture-active [class*="overflow-x-"]::-webkit-scrollbar {
+  display: none !important;
+}
+
+.pdf-capture-active .print\:block { display: block !important; }
+.pdf-capture-active .print\:flex { display: flex !important; }
+.pdf-capture-active .print\:grid { display: grid !important; }
+.pdf-capture-active .no-print { display: none !important; }
+
+.pdf-capture-active, .pdf-capture-active * {
+  -webkit-print-color-adjust: exact !important;
+  print-color-adjust: exact !important;
+  color-scheme: light !important;
+  
+  --tw-bg-opacity: 1 !important;
+  --tw-text-opacity: 1 !important;
+  --tw-border-opacity: 1 !important;
+  --tw-shadow: none !important;
+  --tw-shadow-colored: none !important;
+  --tw-ring-offset-shadow: 0 0 #0000 !important;
+  --tw-ring-shadow: 0 0 #0000 !important;
+  --tw-ring-color: transparent !important;
+  --tw-ring-offset-color: transparent !important;
+  --tw-ring-inset: none !important;
+  
+  box-shadow: none !important;
+  text-shadow: none !important;
+  transition: none !important;
+  animation: none !important;
+  transform: none !important;
+  max-width: none !important;
+  opacity: 1 !important;
+  visibility: visible !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  filter: none !important;
+  
+  /* Additional Tailwind 4 variables */
+  --color-slate-50: #f8fafc !important;
+  --color-slate-100: #f1f5f9 !important;
+  --color-slate-200: #e2e8f0 !important;
+  --color-slate-400: #94a3b8 !important;
+  --color-slate-500: #64748b !important;
+  --color-slate-900: #0f172a !important;
+  
+  /* Force hex colors to bypass oklch parsing errors in some browsers/libs */
+  --color-brand-primary: #2563eb !important;
+  --brand-primary: #2563eb !important;
+  --color-brand-bg: #ffffff !important;
+  --color-brand-text: #0f172a !important;
+  --color-brand-border: #e2e8f0 !important;
+  
+  /* Critical fixes for text artifacts */
+  letter-spacing: normal !important;
+  text-rendering: optimizeSpeed !important;
+  font-variant-ligatures: none !important;
+}
+
+/* Force standard hex for common slate colors used in the UI during capture */
+.pdf-capture-active .text-slate-900, .pdf-capture-active .text-slate-900 * { color: #0f172a !important; }
+.pdf-capture-active .text-slate-800, .pdf-capture-active .text-slate-800 * { color: #1e293b !important; }
+.pdf-capture-active .text-slate-700, .pdf-capture-active .text-slate-700 * { color: #334155 !important; }
+.pdf-capture-active .text-slate-600, .pdf-capture-active .text-slate-600 * { color: #475569 !important; }
+.pdf-capture-active .text-slate-500, .pdf-capture-active .text-slate-500 * { color: #64748b !important; }
+.pdf-capture-active .text-slate-400, .pdf-capture-active .text-slate-400 * { color: #94a3b8 !important; }
+.pdf-capture-active .text-slate-300, .pdf-capture-active .text-slate-300 * { color: #cbd5e1 !important; }
+.pdf-capture-active .text-brand-primary, .pdf-capture-active .text-brand-primary * { color: #2563eb !important; }
+
+.pdf-capture-active .bg-slate-50, .pdf-capture-active [class*="bg-slate-50"] { background-color: #f8fafc !important; }
+.pdf-capture-active .bg-slate-100, .pdf-capture-active [class*="bg-slate-100"] { background-color: #f1f5f9 !important; }
+.pdf-capture-active .bg-slate-200, .pdf-capture-active [class*="bg-slate-200"] { background-color: #e2e8f0 !important; }
+.pdf-capture-active .bg-slate-300, .pdf-capture-active [class*="bg-slate-300"] { background-color: #cbd5e1 !important; }
+.pdf-capture-active .bg-brand-primary\/10 { background-color: #e0e7ff !important; }
+
+.pdf-capture-active .border-slate-100 { border-color: #f1f5f9 !important; }
+.pdf-capture-active .border-slate-200 { border-color: #e2e8f0 !important; }
+.pdf-capture-active .border-slate-900 { border-color: #0f172a !important; }
+.pdf-capture-active .border-brand-primary { border-color: #2563eb !important; }

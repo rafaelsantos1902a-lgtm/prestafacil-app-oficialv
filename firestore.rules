@@ -54,6 +54,18 @@ service cloud.firestore {
         && data.date is string;
     }
 
+    function isValidClient(data) {
+      let requiredFields = ['name'];
+      let optionalFields = ['phone', 'idNumber', 'address', 'workplace', 'createdAt', 'updatedAt'];
+      return data.keys().hasAll(requiredFields)
+        && data.keys().size() <= (requiredFields.size() + optionalFields.size())
+        && data.name is string && data.name.size() <= 120
+        && (!data.has('phone') || data.phone is string)
+        && (!data.has('idNumber') || data.idNumber is string)
+        && (!data.has('address') || data.address is string)
+        && (!data.has('workplace') || data.workplace is string);
+    }
+
     // Match Rules
     match /artifacts/prestafacil-v1/users/{userId} {
       allow get: if isOwner(userId);
@@ -90,6 +102,14 @@ service cloud.firestore {
           && isValidId(transactionId);
           
         allow update: if isOwner(userId) && isValidTransaction(incoming());
+        allow delete: if isOwner(userId);
+      }
+
+      match /clients/{clientId} {
+        allow list: if isOwner(userId);
+        allow get: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidClient(incoming());
+        allow update: if isOwner(userId) && isValidClient(incoming());
         allow delete: if isOwner(userId);
       }
     }
