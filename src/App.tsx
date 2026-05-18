@@ -7,7 +7,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { 
   ShieldCheck, Wallet, TrendingUp, PiggyBank, Search, Plus, 
   CheckCircle2, Calendar, FileText, Printer, X, 
-  MessageCircle, Edit, Trash2, AlertCircle, Hash, BadgeCheck,
+  MessageCircle, Edit, Trash2, AlertCircle, Hash, BadgeCheck, Clock,
   History, ArrowDownRight, ArrowUpRight, Cloud, ListChecks, 
   Phone, Home, Briefcase, Check, Lock, Trash, Upload, Download, Database,
   MapPin, User, Moon, Sun, LogOut
@@ -1384,8 +1384,8 @@ export default function App() {
       const buttons = captureElement.querySelectorAll('.no-print');
       buttons.forEach((btn: any) => btn.style.setProperty('display', 'none', 'important'));
 
-      // Use appropriate capture width for better resolution and matching UI density
-      const captureWidth = isReceipt ? 480 : 900;
+      // Use higher width for non-receipts to ensure content fits without overcrowding
+      const captureWidth = isReceipt ? 480 : 1000;
       
       // Force capturing element to be fully expanded and consistent
       captureElement.style.setProperty('width', `${captureWidth}px`, 'important');
@@ -1400,18 +1400,18 @@ export default function App() {
       captureElement.style.setProperty('background-color', '#ffffff', 'important');
 
       // Enhanced wait for rendering (fonts, layouts)
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await new Promise(resolve => setTimeout(resolve, 1200));
 
       const dataUrl = await toPng(captureElement, {
         quality: 1,
-        pixelRatio: 3, // Higher quality for text
+        pixelRatio: 3,
         backgroundColor: '#ffffff',
         width: captureWidth,
         style: {
           transform: 'none',
           borderRadius: '0',
           boxShadow: 'none',
-          padding: '0px', 
+          padding: isReceipt ? '40px 50px 40px 25px' : '80px 120px 80px 40px', // Reduced left padding to shift content left and compensate for right-side cutoffs
           margin: '0',
           maxWidth: 'none',
           width: `${captureWidth}px`,
@@ -1421,13 +1421,14 @@ export default function App() {
           flexDirection: 'column',
           alignItems: 'stretch',
           justifyContent: 'flex-start',
-          boxSizing: 'border-box'
+          boxSizing: 'border-box',
+          backgroundColor: '#ffffff'
         }
       });
 
       // PDF dimensions
       const pdfPageWidth = isReceipt ? 120 : 210; // Standard A4 for contracts/reports
-      const sideMargin = isReceipt ? 10 : 20; // Correct professional margins
+      const sideMargin = isReceipt ? 10 : 15; // Balanced margins for professional reports
       const contentWidth = pdfPageWidth - (sideMargin * 2);
       
       const img = new Image();
@@ -2127,91 +2128,132 @@ export default function App() {
       <AnimatePresence>
         {/* Modal Plan de Pagos */}
         {showScheduleModal && currentLoan && (
-          <div className="fixed inset-0 bg-brand-bg/95 z-50 flex items-center justify-center p-0 md:p-4 backdrop-blur-md printable-area">
+          <div className="fixed inset-0 bg-slate-950/40 z-50 flex items-center justify-center p-0 md:p-4 backdrop-blur-sm printable-area">
             <motion.div 
-              id="schedule-pdf-content"
               initial={{ opacity: 0, scale: 0.98, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.98, y: 20 }}
-              className="bg-brand-surface w-full h-full md:h-auto md:max-w-2xl md:rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[100vh] md:max-h-[85vh] border border-brand-border"
+              className="bg-white w-full h-full md:h-auto md:max-w-3xl md:rounded-[2.5rem] shadow-2xl overflow-hidden flex flex-col max-h-[100vh] md:max-h-[90vh] border border-slate-100"
             >
-              <div className="p-6 md:p-8 border-b border-brand-border flex justify-between items-center bg-gradient-to-r from-brand-surface to-brand-bg sticky top-0 z-20">
+              <div className="p-6 md:p-8 border-b border-slate-100 flex justify-between items-center bg-white sticky top-0 z-20">
                 <div className="flex items-center gap-4">
-                  <div className="bg-brand-primary/10 p-3 rounded-2xl border border-brand-primary/20">
-                    <ListChecks className="w-6 h-6 text-brand-primary" />
+                  <div className="bg-sky-500/10 p-3 rounded-2xl">
+                    <ListChecks className="w-6 h-6 text-sky-500" />
                   </div>
                   <div>
-                    <h2 className="text-xl font-black text-brand-text uppercase tracking-tight">Plan de Pagos</h2>
-                    <p className="text-[10px] font-black text-brand-text/30 uppercase tracking-widest">{currentLoan.client}</p>
+                    <h2 className="text-xl font-black text-slate-900 uppercase tracking-tight">Plan de Pagos</h2>
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{currentLoan.client}</p>
                   </div>
                 </div>
                 <div className="flex gap-2 no-print">
-                   <button onClick={() => handleDownloadPDF('schedule-pdf-content', `Plan_Pagos_${currentLoan.client.replace(/\s+/g, '_')}`)} className="px-6 py-3 bg-brand-primary text-white rounded-xl font-black text-[10px] uppercase flex items-center gap-2 shadow-lg shadow-brand-primary/20 hover:brightness-110 transition-all">
-                     <Download className="w-4 h-4" /> DESCARGAR PLAN PDF
+                   <button 
+                    onClick={() => handleDownloadPDF('schedule-view', `Plan_Pagos_${currentLoan.client.replace(/\s+/g, '_')}`)}
+                    className="px-6 py-3 bg-slate-900 text-white rounded-xl font-black text-[10px] uppercase flex items-center gap-2 shadow-xl shadow-slate-900/20 hover:bg-black transition-all"
+                   >
+                     <Download className="w-4 h-4" /> DESCARGAR PDF
                    </button>
-                   <button onClick={(e) => closeAllModals(e)} className="p-3 text-brand-text/20 hover:text-brand-text transition-transform hover:scale-110"><X className="w-6 h-6" /></button>
+                   <button onClick={(e) => closeAllModals(e)} className="p-3 text-slate-300 hover:text-slate-600 transition-transform hover:scale-110"><X className="w-6 h-6" /></button>
                 </div>
               </div>
 
-              <div className="flex-1 overflow-y-auto p-2 md:p-8 space-y-6 bg-brand-bg/30">
-                {/* Visualización para impresión */}
-                <div className="hidden print:block mb-8 border-b-2 border-slate-900 pb-4">
-                  <h1 className="text-2xl font-black uppercase tracking-tighter text-slate-900">Plan de Pagos</h1>
-                  <div className="flex justify-between mt-4 text-[10px] font-bold uppercase text-slate-500 gap-8 items-start">
-                    <div className="space-y-1">
-                      <p>CLIENTE: <span className="text-slate-900">{currentLoan.client}</span></p>
-                      <p>TELÉFONO: <span className="text-slate-900">{currentLoan.phone}</span></p>
-                    </div>
-                    <div className="text-right shrink-0 space-y-1">
-                      <p>FECHA: <span className="text-slate-900">{new Date().toLocaleDateString()}</span></p>
-                      <p>ESTADO: <span className="text-slate-900">{currentLoan.status}</span></p>
-                    </div>
-                  </div>
-                </div>
+              <div id="schedule-view" className="flex-1 overflow-y-auto p-4 md:p-12 bg-white">
+                <div className="w-full max-w-[800px] mx-auto space-y-12">
+                   {/* Header para PDF */}
+                   <div className="text-center space-y-4 pb-10 border-b-2 border-slate-50">
+                      <h1 className="text-4xl font-black text-slate-950 uppercase tracking-tight">Plan de Pagos</h1>
+                      <div className="flex flex-col items-center gap-1.5">
+                        <p className="text-[11px] font-black text-sky-500 uppercase tracking-[0.4em]">Presta Fácil • Soluciones Financieras</p>
+                        <p className="text-[9px] font-bold text-slate-300 uppercase tracking-wider">Documento Oficial de Amortización</p>
+                      </div>
+                   </div>
 
-                <div className="bg-brand-surface rounded-2xl border border-brand-border overflow-x-auto shadow-sm">
-                  <table className="w-full text-left border-collapse min-w-[500px]">
-                    <thead>
-                      <tr className="bg-brand-bg/50 border-b border-brand-border">
-                        <th className="px-6 py-4 text-[9px] font-black text-brand-text/30 uppercase tracking-widest">Cuota</th>
-                        <th className="px-6 py-4 text-[9px] font-black text-brand-text/30 uppercase tracking-widest">Vence</th>
-                        <th className="px-6 py-4 text-[9px] font-black text-brand-text/30 uppercase tracking-widest text-right">Monto</th>
-                        <th className="px-6 py-4 text-[9px] font-black text-brand-text/30 uppercase tracking-widest text-center">Estado</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-brand-border/50">
-                      {calculateSchedule(currentLoan).map((s) => (
-                        <tr key={s.num} className="hover:bg-brand-bg/30 transition-colors group">
-                          <td className="px-6 py-4 font-black text-xs text-brand-text/40">#{s.num}</td>
-                          <td className="px-6 py-4 font-bold text-xs text-brand-text/60">{s.date}</td>
-                  <td className="px-6 py-4 font-black text-sm font-mono text-right text-brand-text/80">
-                    <div className="flex flex-col items-end">
-                      <span>{formatMoney(s.amountDue > 0 && s.amountDue < s.amount ? s.amountDue : s.amount)}</span>
-                      {s.amountDue > 0 && s.amountDue < s.amount && <span className="text-[10px] text-brand-primary">PENDIENTE</span>}
-                      {s.mora > 0 && <span className="text-[8px] text-brand-red">+{formatMoney(s.mora)} MORA</span>}
-                    </div>
-                  </td>
-                          <td className="px-6 py-4">
-                            <div className="flex justify-center items-center gap-2">
-                               {s.status === 'PAGADO' ? (
-                                 <div className="bg-brand-green/10 text-brand-green px-3 py-1 rounded-full text-[8px] font-black uppercase border border-brand-green/20 flex items-center gap-1">
-                                   <Check className="w-3 h-3" /> PAGADO
-                                 </div>
-                               ) : s.status === 'MORA' ? (
-                                 <div className="bg-brand-red/10 text-brand-red px-3 py-1 rounded-full text-[8px] font-black uppercase border border-brand-red/20 flex items-center gap-1">
-                                   <AlertCircle className="w-3 h-3" /> {formatMoney(s.mora)} MORA
-                                 </div>
-                               ) : (
-                                 <div className="bg-brand-text/5 text-brand-text/30 px-3 py-1 rounded-full text-[8px] font-black uppercase border border-brand-border flex items-center gap-1">
-                                   <History className="w-3 h-3" /> PENDIENTE
-                                 </div>
-                               )}
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                   <div className="grid grid-cols-2 gap-x-16 gap-y-8 py-8 border-b border-slate-50 px-4">
+                      <div className="space-y-6">
+                        <div>
+                          <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Cliente Beneficiario</p>
+                          <p className="text-sm font-black text-slate-900 uppercase tracking-tight">{currentLoan.client}</p>
+                        </div>
+                        <div>
+                          <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Teléfono de Contacto</p>
+                          <p className="text-sm font-bold text-slate-600">{currentLoan.phone}</p>
+                        </div>
+                      </div>
+                      <div className="space-y-6 text-right">
+                        <div>
+                          <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Estado del Préstamo</p>
+                          <span className={`inline-block px-4 py-1.5 rounded-xl text-[10px] font-black uppercase shadow-sm ${
+                            currentLoan.status === 'ACTIVO' ? 'bg-emerald-500 text-white' : 
+                            currentLoan.status === 'MORA' ? 'bg-rose-500 text-white' : 'bg-slate-100 text-slate-400'
+                          }`}>
+                            {currentLoan.status}
+                          </span>
+                        </div>
+                        <div>
+                          <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Fecha de Emisión</p>
+                          <p className="text-sm font-bold text-slate-600 italic font-serif">
+                            {new Date().toLocaleDateString('es-DO', { day: '2-digit', month: 'long', year: 'numeric' })}
+                          </p>
+                        </div>
+                      </div>
+                   </div>
+
+                   <div className="bg-white rounded-3xl border border-slate-100 overflow-hidden shadow-sm">
+                      <table className="w-full text-left border-collapse">
+                        <thead>
+                          <tr className="bg-slate-50 border-b border-slate-100">
+                            <th className="px-6 py-5 text-[9px] font-black text-slate-400 uppercase tracking-widest">Cuota</th>
+                            <th className="px-6 py-5 text-[9px] font-black text-slate-400 uppercase tracking-widest">Vencimiento</th>
+                            <th className="px-6 py-5 text-[9px] font-black text-slate-400 uppercase tracking-widest text-right">Monto a Pagar</th>
+                            <th className="px-6 py-5 text-[9px] font-black text-slate-400 uppercase tracking-widest text-center">Estado</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-50 text-[11px]">
+                          {calculateSchedule(currentLoan).map((s) => (
+                            <tr key={s.num} className="hover:bg-slate-50/50 transition-colors">
+                              <td className="px-6 py-5 font-black text-slate-400">#{s.num.toString().padStart(2, '0')}</td>
+                              <td className="px-6 py-5 font-bold text-slate-600 uppercase">{s.date}</td>
+                              <td className="px-6 py-5 font-black text-right text-slate-900">
+                                <div className="flex flex-col items-end">
+                                  <span>{formatMoney(s.amountDue > 0 && s.amountDue < s.amount ? s.amountDue : s.amount)}</span>
+                                  {s.mora > 0 && <span className="text-[8px] text-red-500 mt-0.5">+{formatMoney(s.mora)} MORA</span>}
+                                </div>
+                              </td>
+                              <td className="px-6 py-5">
+                                <div className="flex justify-center">
+                                   {s.status === 'PAGADO' ? (
+                                     <div className="bg-green-50 text-green-600 px-3 py-1 rounded-full text-[8px] font-black uppercase flex items-center gap-1 border border-green-100">
+                                       <Check className="w-3 h-3" /> PAGADO
+                                     </div>
+                                   ) : s.status === 'MORA' ? (
+                                     <div className="bg-red-50 text-red-600 px-3 py-1 rounded-full text-[8px] font-black uppercase flex items-center gap-1 border border-red-100">
+                                       <AlertCircle className="w-3 h-3" /> EN MORA
+                                     </div>
+                                   ) : (
+                                     <div className="bg-slate-50 text-slate-400 px-3 py-1 rounded-full text-[8px] font-black uppercase flex items-center gap-1 border border-slate-100">
+                                       <Clock className="w-3 h-3" /> PENDIENTE
+                                     </div>
+                                   )}
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                   </div>
+
+                   <div className="pt-10 flex justify-between items-center px-4">
+                      <div className="space-y-1">
+                        <p className="text-[9px] font-black text-slate-300 uppercase tracking-widest">Sello Digital</p>
+                        <div className="flex items-center gap-2 text-sky-500/30">
+                           <ShieldCheck className="w-8 h-8" />
+                           <div className="h-0.5 w-20 bg-slate-100"></div>
+                        </div>
+                      </div>
+                      <div className="text-right space-y-1">
+                         <p className="text-[10px] font-black text-slate-900 uppercase">Presta Fácil Dominicana</p>
+                         <p className="text-[8px] font-bold text-slate-400 uppercase tracking-tighter">Sistema de Gestión de Cartera v2.0</p>
+                      </div>
+                   </div>
                 </div>
               </div>
             </motion.div>
